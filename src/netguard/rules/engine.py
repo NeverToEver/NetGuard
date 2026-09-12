@@ -36,6 +36,24 @@ class Alert:
     src_port: int | None
     dst_port: int | None
     summary: str
+    kind: str = "rule"
+    severity: str = "medium"
+    rule_id: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "timestamp": self.timestamp,
+            "kind": self.kind,
+            "severity": self.severity,
+            "rule_id": self.rule_id,
+            "msg": self.msg,
+            "protocol": self.protocol,
+            "src": self.src,
+            "src_port": self.src_port,
+            "dst": self.dst,
+            "dst_port": self.dst_port,
+            "summary": self.summary,
+        }
 
 
 DEFAULT_RULES = 'alert tcp any any -> any 80 (content "GET"; msg "检测到 HTTP GET 请求";)'
@@ -76,7 +94,12 @@ class RuleEngine:
             self.index = index
         return failed
 
-    def match(self, packet: PacketInfo) -> list[Alert]:
+    def match(
+        self,
+        packet: PacketInfo,
+        stream: bytes | None = None,
+        matched: set[str] | None = None,
+    ) -> list[Alert]:
         protocol = packet.protocol.upper()
         with self._lock:
             candidates = self.index.get(protocol, ())
@@ -95,32 +118,73 @@ class RuleEngine:
         alerts: list[Alert] = []
         for rule in candidates:
             if self._matches(rule, packet):
-                alerts.append(
-                    Alert(
-                        timestamp=packet.timestamp if packet.timestamp is not None else self._clock(),
-                        msg=rule.msg,
-                        protocol=packet.protocol,
-                        src=packet.src,
-                        dst=packet.dst,
-                        src_port=packet.src_port,
-                        dst_port=packet.dst_port,
-                        summary=packet.summary,
-                    )
-                )
+                if matched is not None and rule.content:
+                    matched.add(_rule_key(rule))
+                alerts.append(self._build_alert(rule, packet))
+                continue
+            if self._matches_stream(rule, packet, stream, matched):
+                alerts.append(self._build_alert(rule, packet))
         return alerts
 
-    def _matches(self, rule: Rule, packet: PacketInfo) -> bool:
+    def _matches_stream(
+        self,
+        rule: Rule,
+        packet: PacketInfo,
+        stream: bytes | None,
+        matched: set[str] | None,
+    ) -> bool:
+        """内容规则的回退匹配：在整个 TCP 会话重组流中查找。
+
+        这能检出把关键词拆分到多个 TCP 段（或跨包）以绕过单包检测的规避手法。
+        同一会话内同一规则只告警一次，避免每个后续数据包重复命中。
+        """
+        if not rule.content or not stream:
+            return False
+        if not self._endpoint_and_proto_match(rule, packet):
+            return False
+        key = _rule_key(rule)
+        if matched is not None and key in matched:
+            return False
+        if rule.content not in stream:
+            return False
+        if matched is not None:
+            matched.add(key)
+        return True
+
+    def _endpoint_and_proto_match(self, rule: Rule, packet: PacketInfo) -> bool:
         pkt_proto = packet.protocol.upper()
         if rule.protocol != "ANY" and rule.protocol != pkt_proto:
             tcp_to_http = rule.protocol == "TCP" and pkt_proto == "HTTP"
             udp_to_dns = rule.protocol == "UDP" and pkt_proto == "DNS"
             if not (tcp_to_http or udp_to_dns):
                 return False
-        if not _endpoint_matches(rule, packet):
+        return _endpoint_matches(rule, packet)
+
+    def _matches(self, rule: Rule, packet: PacketInfo) -> bool:
+        if not self._endpoint_and_proto_match(rule, packet):
             return False
         if rule.content and rule.content not in packet.payload and rule.content not in packet.raw:
             return False
         return True
+
+    def _build_alert(self, rule: Rule, packet: PacketInfo) -> Alert:
+        return Alert(
+            timestamp=packet.timestamp if packet.timestamp is not None else self._clock(),
+            msg=rule.msg,
+            protocol=packet.protocol,
+            src=packet.src,
+            dst=packet.dst,
+            src_port=packet.src_port,
+            dst_port=packet.dst_port,
+            summary=packet.summary,
+        )
+
+
+def _rule_key(rule: Rule) -> str:
+    return (
+        f"{rule.protocol}|{rule.src}|{rule.src_port}|{rule.direction}"
+        f"|{rule.dst}|{rule.dst_port}|{rule.content!r}"
+    )
 
 
 def parse_rule(text: str) -> Rule:

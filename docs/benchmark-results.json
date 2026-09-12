@@ -1,0 +1,50 @@
+{
+  "python": "3.11.9",
+  "platform": "win32",
+  "templates": 12,
+  "parse": {
+    "packets": 200000,
+    "seconds": 1.7185185000053025,
+    "packets_per_second": 116379.31159855591,
+    "bytes_per_second": 8032500.086532328,
+    "us_per_packet": 8.592592500026512
+  },
+  "pipeline": {
+    "packets": 200000,
+    "seconds": 4.477102700002433,
+    "packets_per_second": 44671.74719934195,
+    "bytes_per_second": 3083243.9916985817
+  },
+  "rule_match": {
+    "packets": 50000,
+    "seconds": 9.037828000000445,
+    "mean_us": 180.54648600009386,
+    "median_us": 249.89999656099826,
+    "p99_us": 563.4000044665299
+  },
+  "memory": {
+    "rss_before": 40112128,
+    "rss_after": 49319936,
+    "rss_delta": 9207808,
+    "packets": 50000
+  },
+  "detection": [
+    {
+      "scenario": "SYN flood (150 SYN/5s, threshold 100)",
+      "detected": true
+    },
+    {
+      "scenario": "Port scan (40 ports/10s, threshold 20)",
+      "detected": true
+    },
+    {
+      "scenario": "DNS tunnel (60 long-name queries/10s, threshold 20)",
+      "detected": true
+    }
+  ],
+  "false_positive": {
+    "packets": 1000,
+    "false_alerts": 1,
+    "false_positive_rate": 0.001
+  }
+}

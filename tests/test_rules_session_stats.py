@@ -379,3 +379,35 @@ def test_traffic_stats_protocol_counts_capped() -> None:
         stats.update(pkt)
     snap = stats.snapshot()
     assert len(snap.protocol_counts) <= 2
+
+
+# --- 会话重组流检测（防拆包/分片绕过） ---
+
+def test_stream_match_detects_keyword_split_across_segments() -> None:
+    engine = RuleEngine(['alert tcp any any -> any any (content "administrator"; msg "检测到敏感关键字";)'])
+    tracker = SessionTracker()
+
+    first = tcp_packet(seq=1, payload=b"admin")
+    session = tracker.update(first)
+    # 首段载荷不含完整关键字
+    assert engine.match(first, stream=session.stream, matched=session.matched_rules) == []
+
+    second = tcp_packet(seq=6, payload=b"istrator")
+    session = tracker.update(second)
+    alerts = engine.match(second, stream=session.stream, matched=session.matched_rules)
+
+    assert len(alerts) == 1
+    assert alerts[0].msg == "检测到敏感关键字"
+
+
+def test_stream_match_alerts_only_once_per_session() -> None:
+    engine = RuleEngine(['alert tcp any any -> any any (content "secret"; msg "检测到 secret";)'])
+    tracker = SessionTracker()
+
+    first = tcp_packet(seq=1, payload=b"secret")
+    session = tracker.update(first)
+    assert len(engine.match(first, stream=session.stream, matched=session.matched_rules)) == 1
+
+    follow_up = tcp_packet(seq=7, payload=b" more data")
+    session = tracker.update(follow_up)
+    assert engine.match(follow_up, stream=session.stream, matched=session.matched_rules) == []

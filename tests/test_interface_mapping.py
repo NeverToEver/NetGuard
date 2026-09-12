@@ -1,5 +1,4 @@
 from netguard.capture.interface_mapping import (
-    _native_alias,
     build_device_displays,
     device_recommendation_reason,
     recommend_device_display,
@@ -7,46 +6,63 @@ from netguard.capture.interface_mapping import (
 from netguard.capture.pcap import CaptureDevice
 
 
-def test_native_alias_recognizes_en() -> None:
-    assert _native_alias("en0") == "en0"
-    assert _native_alias("en5") == "en5"
-
-
-def test_native_alias_recognizes_lo() -> None:
-    assert _native_alias("lo0") == "lo0"
-
-
-def test_native_alias_rejects_unknown() -> None:
-    assert _native_alias("eth0") == ""
-
-
-def test_should_map_windows_wifi_to_mac_en0() -> None:
+def test_windows_displays_use_friendly_name_and_kind_note() -> None:
     devices = [
-        CaptureDevice(r"\Device\NPF_{ETH}", "Intel(R) Ethernet Connection"),
-        CaptureDevice(r"\Device\NPF_{WIFI}", "Wi-Fi 6 Adapter"),
+        CaptureDevice(r"\Device\NPF_{WIFI}", "Wi-Fi"),
+        CaptureDevice(r"\Device\NPF_{ETH}", "Intel(R) Ethernet Connection I219-V"),
+        CaptureDevice(r"\Device\NPF_{VM}", "VMware Virtual Ethernet Adapter"),
         CaptureDevice(r"\Device\NPF_Loopback", "Npcap Loopback Adapter"),
     ]
 
     displays = build_device_displays(devices, system="Windows")
-    aliases = {item.device.name: item.mac_alias for item in displays}
+    notes = {item.device.name: item.note for item in displays}
 
-    assert aliases[r"\Device\NPF_{WIFI}"] == "en0"
-    assert aliases[r"\Device\NPF_{ETH}"] == "en1"
-    assert aliases[r"\Device\NPF_Loopback"] == "lo0"
+    assert notes[r"\Device\NPF_{WIFI}"] == "无线网卡"
+    assert notes[r"\Device\NPF_{ETH}"] == "有线网卡"
+    assert notes[r"\Device\NPF_{VM}"] == "虚拟/VPN 接口"
+    assert notes[r"\Device\NPF_Loopback"] == "回环接口"
 
 
-def test_should_allow_manual_mac_alias_override() -> None:
-    device = CaptureDevice(r"\Device\NPF_{WIFI}", "Wi-Fi")
-
-    displays = build_device_displays(
-        [device],
-        manual_aliases={device.name: "en3"},
-        system="Windows",
+def test_windows_friendly_name_extracts_quoted_adapter_name() -> None:
+    device = CaptureDevice(
+        r"\Device\NPF_{GUID}",
+        "Microsoft Wi-Fi Direct Virtual Adapter #2 'Wi-Fi 2'",
     )
 
-    assert displays[0].mac_alias == "en3"
-    assert displays[0].is_manual is True
-    assert "手动" in displays[0].note
+    displays = build_device_displays([device], system="Windows")
+
+    assert displays[0].friendly_name == "Wi-Fi 2"
+
+
+def test_windows_loopback_without_description_gets_fallback_name() -> None:
+    device = CaptureDevice(r"\Device\NPF_Loopback", "")
+
+    displays = build_device_displays([device], system="Windows")
+
+    assert displays[0].friendly_name == "Npcap Loopback Adapter"
+    assert displays[0].note == "回环接口"
+
+
+def test_native_displays_use_description_as_name() -> None:
+    device = CaptureDevice("en0", "Wi-Fi")
+
+    displays = build_device_displays([device], system="Darwin")
+
+    assert displays[0].display_name == "Wi-Fi"
+    assert displays[0].note == "本机接口"
+
+
+def test_duplicate_display_names_are_disambiguated() -> None:
+    devices = [
+        CaptureDevice("eth0", "Ethernet"),
+        CaptureDevice("eth1", "Ethernet"),
+    ]
+
+    displays = build_device_displays(devices, system="Linux")
+    names = {item.device.name: item.display_name for item in displays}
+
+    assert names["eth0"] == "Ethernet - eth0"
+    assert names["eth1"] == "Ethernet - eth1"
 
 
 def test_should_recommend_windows_wifi_over_loopback_and_virtual() -> None:
@@ -74,3 +90,22 @@ def test_should_recommend_native_physical_interface_over_tunnel_and_loopback() -
 
     assert recommended is not None
     assert recommended.device.name == "en0"
+
+
+def test_decode_output_handles_gbk_windows_ipconfig() -> None:
+    from netguard.discovery.subnet import _decode_output
+
+    # 中文 Windows 的 ipconfig 以 GBK(cp936) 输出，之前按 UTF-8 解码会崩溃
+    gbk_bytes = "Windows IP 配置\r\n子网掩码".encode("gbk")
+    text = _decode_output(gbk_bytes)
+    assert "Windows IP 配置" in text
+    assert "子网掩码" in text
+
+
+def test_decode_output_handles_empty_and_invalid() -> None:
+    from netguard.discovery.subnet import _decode_output
+
+    assert _decode_output(None) == ""
+    assert _decode_output(b"") == ""
+    # 纯 UTF-8 文本应正常解码
+    assert _decode_output("正常".encode("utf-8")) == "正常"

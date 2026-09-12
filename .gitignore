@@ -12,3 +12,5 @@ output/
 tmp/
 ~$*.docx
 *.egg-info/
+.zcode/
+*.pcap.tmp

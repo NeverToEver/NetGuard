@@ -66,13 +66,15 @@ Wi-Fi
 Ethernet
 ```
 
-NetGuard 会在 Windows 界面中显示 Mac 风格提示，例如：
+NetGuard 会在 Windows 界面中显示可读名称与类型标签，例如：
 
 ```text
-Wi-Fi 6 Adapter - Windows Wi-Fi 6 Adapter 对应 Mac en0（无线）
-Intel Ethernet - Windows Intel Ethernet 对应 Mac en1（有线）
-Npcap Loopback Adapter - Windows Npcap Loopback Adapter 对应 Mac lo0（回环）
+Wi-Fi 6 Adapter（无线网卡）
+Intel(R) Ethernet Connection I219-V（有线网卡）
+Npcap Loopback Adapter（回环接口）
 ```
+
+下方说明里另有 macOS 与 Windows 的接口对照与推荐选择方法。
 
 ### 3.2 启动图形界面
 
@@ -104,25 +106,24 @@ python main.py
 
 ### 4.2 Windows
 
-Windows 不会原生提供 `en0` 名称。NetGuard 会自动推断对应关系：
+Windows 不会原生提供 `en0` 名称，网卡以 `\Device\NPF_{GUID}` 形式出现。
+NetGuard 会为每个网卡显示可读名称与类型标签，并支持自动推荐：
 
-- Wi-Fi / Wireless / WLAN：对应 Mac `en0`
-- Ethernet / LAN：对应 Mac `en1` 或后续编号
-- Npcap Loopback Adapter：对应 Mac `lo0`
-- Hyper-V / VMware / VPN / Tunnel：标注为虚拟或 VPN 接口
+- Wi-Fi / Wireless / WLAN：标注“无线网卡”
+- Ethernet / LAN：标注“有线网卡”
+- Npcap Loopback Adapter：标注“回环接口”
+- Hyper-V / VMware / VPN / Tunnel：标注“虚拟/VPN 接口”
 
-如果实验要求“达到 Mac 上选择 en0 的效果”，Windows 上通常选择当前正在联网的 Wi-Fi 网卡；如果机器通过网线联网，则选择 Ethernet 网卡。
+如果实验要求“达到 Mac 上选择 en0 的效果”，Windows 上通常选择当前正在联网的
+Wi-Fi 网卡；如果机器通过网线联网，则选择有线网卡。也可以直接点击 `自动推断`，
+让程序推荐最可能联网的接口。
 
-### 4.3 手动修改映射
+### 4.3 选择与推荐
 
-如果自动推断不符合实验机器环境：
+1. 在网卡下拉框中选择目标 Windows 网卡（名称后带类型标签）
+2. 如不确定选哪个，点击 `自动推断` 应用推荐网卡，日志区会说明推荐原因
 
-1. 在网卡下拉框中选择目标 Windows 网卡
-2. 在 `Mac映射` 输入框中填写 `en0`、`en1` 或 `lo0`
-3. 点击 `应用映射`
-4. 如需恢复默认规则，点击 `自动推断`
-
-注意：该映射只影响界面提示。真正抓包仍使用系统返回的真实接口名。
+注意：显示名与推荐只影响界面提示与操作，真正抓包仍使用系统返回的真实接口名。
 
 ## 5. 设置 BPF 抓包过滤
 

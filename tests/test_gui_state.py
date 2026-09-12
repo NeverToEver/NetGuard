@@ -89,6 +89,8 @@ class FakeText:
 class FakePipeline:
     def __init__(self, events: list[PacketEvent]) -> None:
         self.events = events
+        self.capture_error: str | None = None
+        self.replay_finished = False
 
     def pump(self, max_events: int) -> list[PacketEvent]:
         events = self.events
@@ -139,11 +141,23 @@ def fake_app(events: list[PacketEvent], *, paused: bool = False, display_filter:
     app.display_to_device = {"dev": "dev"}
     app.capturing = True
     app.paused = paused
+    app._pause_event_total = 0
+    app.dark_mode = FakeVar(False)
+    app.status_text_var = FakeVar()
+    app.busy_text_var = FakeVar()
+    app._status_bar = None
+    app._busy_label = None
+    app._tooltips = []
+    app._sort_column = ""
+    app._sort_descending = False
+    app._busy_count = 0
+    app._background_queue = __import__("queue").Queue()
     app._capture_indicator = None
     app.start_btn = FakeButton()
     app.stop_btn = FakeButton()
     app.pause_btn = FakeButton()
     app.export_alerts_btn = FakeButton()
+    app.save_pcap_btn = FakeButton()
     app._refresh_stats = lambda: None
     app.after = lambda *args: None
     return app
@@ -165,9 +179,20 @@ def test_alerts_are_recorded_while_table_refresh_is_paused() -> None:
 
     app._tick()
 
+    # 暂停期间事件仍被累积，但不刷新界面、不写告警
+    assert len(app.events) == 1
+    assert app.alerts_placeholder is True
+    assert app.alerts.size() == 1  # 仅占位符
+    assert app.alert_packet_indices == []
+    assert app.table.get_children() == ()
+
+    # 恢复刷新时通过 _catch_up_paused_alerts 补录暂停期间的告警
+    app.paused = False
+    app._catch_up_paused_alerts()
+
+    assert app.alerts_placeholder is False
     assert app.alerts.size() == 1
     assert app.alert_packet_indices == [0]
-    assert app.table.get_children() == ()
 
 
 def test_selected_packet_uses_event_offset_after_event_trim() -> None:

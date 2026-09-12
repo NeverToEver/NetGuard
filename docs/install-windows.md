@@ -12,28 +12,40 @@ Windows 平台使用 Npcap / WinPcap 原生 `wpcap.dll` 接口。
 
 ```powershell
 cd C:\path\to\NetGuard
-py -m pip install -e .
+py -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e .
 ```
 
 ## 运行
 
 ```powershell
+# 直接使用 python
 py main.py --list-devices
 py main.py
+
+# 或使用启动脚本（自动检测解释器）
+.\scripts\run_netguard.ps1
+.\scripts\run_netguard.bat --list-devices
+
+# 离线回放 pcap / 保存抓包 / 导出告警
+py main.py --read capture.pcap
+py main.py --no-gui --interface "Wi-Fi" --write out.pcap
 ```
 
-## Windows 与 Mac 接口提示
+## Windows 网卡显示与推荐
 
-Windows 上 Npcap 返回的真实抓包接口通常是 `\Device\NPF_{GUID}`，不会原生提供 macOS 的 `en0`、`en1` 名称。NetGuard 会在界面中为每个 Windows 网卡附加 Mac 对应提示，例如：
+Windows 上 Npcap 返回的真实抓包接口通常是 `\Device\NPF_{GUID}`，不会原生提供
+macOS 的 `en0`、`en1` 名称。NetGuard 会在界面中为每个 Windows 网卡显示可读
+名称与类型标签，例如：
 
 ```text
-Wi-Fi 6 Adapter - Windows Wi-Fi 6 Adapter 对应 Mac en0（无线）
-Intel Ethernet - Windows Intel Ethernet 对应 Mac en1（有线）
-Npcap Loopback Adapter - Windows Npcap Loopback Adapter 对应 Mac lo0（回环）
+Wi-Fi 6 Adapter（无线网卡）
+Intel(R) Ethernet Connection I219-V（有线网卡）
+Npcap Loopback Adapter（回环接口）
 ```
 
-自动推断规则优先把 Wi-Fi 映射为 `en0`，其次映射有线 Ethernet，再处理其他虚拟/VPN/未知接口。这个映射只是界面提示和操作习惯别名；开始抓包时程序仍会使用 Npcap 的真实接口名。
-
-如果自动推断不符合当前机器环境，可以在界面的 `Mac映射` 输入框中填写 `en0`、`en1` 等名称并点击 `应用映射`；点击 `自动推断` 可恢复默认规则。
+界面的 `自动推断` 按钮会按打分规则推荐最可能联网的网卡（无线/有线加分，
+虚拟/VPN/回环减分），并在日志区说明推荐原因。显示名与推荐只影响界面提示，
+开始抓包时程序仍使用 Npcap 的真实接口名。
 
 如果无法打开网卡，请使用管理员 PowerShell 运行。

@@ -194,7 +194,7 @@ def test_truncated_tcp_header() -> None:
 
 
 def test_ipv4_with_unknown_protocol() -> None:
-    raw = ethernet(ipv4(b"", proto=1))
+    raw = ethernet(ipv4(b"", proto=99))
     packet = parse_packet(raw)
     assert packet.summary.startswith("IPv4 协议号")
 
@@ -202,7 +202,7 @@ def test_ipv4_with_unknown_protocol() -> None:
 def test_ipv4_with_icmp_protocol() -> None:
     raw = ethernet(ipv4(b"\x08\x00\xf7\xff\x00\x00\x00\x00", proto=1))
     packet = parse_packet(raw)
-    assert packet.protocol == "OTHER"
+    assert packet.protocol == "ICMP"
     assert packet.ip["protocol"] == 1
 
 

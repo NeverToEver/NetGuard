@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import ipaddress
+import locale
 import logging
 import platform
 import re
@@ -152,8 +153,31 @@ def ping_sweep(
     return alive
 
 
-def _run_command(args: list[str], *, timeout: float = 10.0) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+def _decode_output(data: bytes | None) -> str:
+    """把子进程原始输出解码为文本。
+
+    Windows 上 ipconfig 等命令常按本地代码页（如中文 GBK/cp936）输出，若强制
+    UTF-8 解码会抛 UnicodeDecodeError 并让 stdout 变成 None。这里按 UTF-8 →
+    当地首选编码 → GBK → latin-1 的顺序尝试，最后以 replace 兜底，保证不崩。
+    """
+    if not data:
+        return ""
+    encodings = ["utf-8", locale.getpreferredencoding(False), "gbk", "latin-1"]
+    seen: set[str] = set()
+    for encoding in encodings:
+        if not encoding or encoding.lower() in seen:
+            continue
+        seen.add(encoding.lower())
+        try:
+            return data.decode(encoding)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
+def _run_command(args: list[str], *, timeout: float = 10.0) -> subprocess.CompletedProcess[bytes]:
+    """执行命令并返回字节输出，由调用方按平台编码解码。"""
+    return subprocess.run(args, capture_output=True, timeout=timeout)
 
 
 def _normalize_device_token(value: str) -> str:
@@ -237,14 +261,14 @@ def _resolve_netbios(ip: str, timeout: float = 2.0) -> str | None:
         cmd = ["nmblookup", "-A", ip]
     try:
         result = subprocess.run(
-            cmd, capture_output=True, timeout=timeout + 2.0, text=True
+            cmd, capture_output=True, timeout=timeout + 2.0
         )
         if result.returncode != 0:
             return None
-        stderr_text = result.stderr.strip()
+        stderr_text = _decode_output(result.stderr).strip()
         if stderr_text:
             logger.debug("nbtstat/nmblookup stderr for %s: %s", ip, stderr_text[:200])
-        stdout_text = result.stdout.strip()
+        stdout_text = _decode_output(result.stdout).strip()
         if not stdout_text:
             return None
         logger.debug("nbtstat/nmblookup raw output for %s:\n%s", ip, stdout_text[:500])
@@ -315,17 +339,15 @@ def detect_subnet_os_fallback(device_name: str, aliases: tuple[str, ...] = ()) -
 def _detect_unix_subnets(ifname: str) -> list[SubnetInfo]:
     result: list[SubnetInfo] = []
     try:
-        proc = subprocess.run(
-            ["ifconfig", ifname], capture_output=True, text=True, timeout=5
-        )
+        proc = subprocess.run(["ifconfig", ifname], capture_output=True, timeout=5)
     except (subprocess.TimeoutExpired, OSError, FileNotFoundError):
         try:
             proc = subprocess.run(
-                ["ip", "addr", "show", ifname], capture_output=True, text=True, timeout=5
+                ["ip", "addr", "show", ifname], capture_output=True, timeout=5
             )
         except (subprocess.TimeoutExpired, OSError, FileNotFoundError):
             return result
-    output = proc.stdout
+    output = _decode_output(proc.stdout)
     for m in re.finditer(r'inet (\d+\.\d+\.\d+\.\d+).*?netmask (0x[0-9a-fA-F]+)', output):
         ip = m.group(1)
         mask_hex = int(m.group(2), 16)
@@ -349,7 +371,7 @@ def _detect_windows_subnets(device_name: str, aliases: tuple[str, ...] = ()) -> 
         proc = _run_command(["ipconfig"], timeout=10)
     except (subprocess.TimeoutExpired, OSError, FileNotFoundError):
         return []
-    sections = _split_ipconfig_sections(proc.stdout)
+    sections = _split_ipconfig_sections(_decode_output(proc.stdout))
     candidates = tuple(dict.fromkeys(name for name in (device_name, *aliases) if name))
     matching_sections = [
         section for section in sections

@@ -22,6 +22,7 @@ class Session:
     stream: bytearray = field(default_factory=bytearray)
     http_events: list[str] = field(default_factory=list)
     http_scan_offset: int = 0
+    matched_rules: set[str] = field(default_factory=set)
 
 
 class SessionTracker:

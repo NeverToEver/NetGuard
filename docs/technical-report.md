@@ -16,7 +16,7 @@ NetGuard 的核心依赖来自操作系统提供的抓包能力。
 | Linux | libpcap | `eth0`, `wlan0`, `lo` | 通常需要 root 或 capture capability |
 | Windows | Npcap / WinPcap | `\Device\NPF_{GUID}` | 安装 Npcap，必要时管理员运行 |
 
-Windows 与 macOS 的接口命名机制不同。macOS 使用 BSD 风格接口名，例如 `en0` 通常代表默认无线或主要物理网卡；Windows Npcap 返回的是设备路径和 GUID，例如 `\Device\NPF_{...}`。因此 Windows 不会原生出现 `en0`，项目通过界面提示提供 Mac 风格的对应关系。
+Windows 与 macOS 的接口命名机制不同。macOS 使用 BSD 风格接口名，例如 `en0` 通常代表默认无线或主要物理网卡；Windows Npcap 返回的是设备路径和 GUID，例如 `\Device\NPF_{...}`。因此 Windows 不会原生出现 `en0`，项目通过可读名称、类型标签与自动推荐来帮助选择接口（见第 5 节）。
 
 ## 3. 系统架构
 
@@ -26,7 +26,7 @@ Windows 与 macOS 的接口命名机制不同。macOS 使用 BSD 风格接口名
 | --- | --- | --- |
 | 启动入口 | `main.py`, `src/netguard/app.py` | 命令行参数处理、GUI/控制台模式启动 |
 | 抓包后端 | `src/netguard/capture/pcap.py` | 加载 pcap 库、枚举设备、打开网卡、设置 BPF、读取原始包 |
-| 接口映射 | `src/netguard/capture/interface_mapping.py` | 生成 Windows 与 Mac 接口习惯名的提示和别名 |
+| 接口映射 | `src/netguard/capture/interface_mapping.py` | 生成跨平台网卡显示名、类型标签与自动推荐 |
 | 数据管线 | `src/netguard/pipeline.py` | 捕获线程、解析线程、事件队列、统计与告警分发 |
 | 协议解析 | `src/netguard/parser/packet.py` | Ethernet、IPv4、TCP、UDP、HTTP、DNS 解析 |
 | IDS 规则 | `src/netguard/rules/engine.py` | 简化规则加载与匹配 |
@@ -58,43 +58,53 @@ pcap/Npcap 原始包
 
 这种设计避免了对第三方 Python 抓包库的强依赖，也能更清楚地展示 libpcap/Npcap 的原生工作方式。
 
-## 5. Windows 与 Mac 接口兼容性提示
+## 5. Windows 接口适配
 
 ### 5.1 问题背景
 
-用户在 macOS 上通常选择 `en0` 完成抓包，但在 Windows 上只能看到 Npcap 设备路径，例如：
+macOS 上通常选择 `en0` 完成抓包，但 Windows 上只能看到 Npcap 设备路径，例如：
 
 ```text
 \Device\NPF_{0AFD3ED9-02C8-0811-124D-1682118B6574}
 ```
 
-这不是程序错误，而是平台接口命名方式不同。为了保持接近 Wireshark 的操作体验，NetGuard 在界面中为 Windows 网卡附加 Mac 风格提示。
+这不是程序错误，而是平台接口命名方式不同。为了保持接近 Wireshark 的操作体验，
+NetGuard 在界面中为每个网卡显示可读名称、类型标签，并自动推荐最可能联网的网卡。
 
-### 5.2 自动推断规则
+### 5.2 网卡显示与分类规则
 
-当前推断规则如下：
+`capture/interface_mapping.py` 按平台生成显示信息。Windows 下先识别类型，再给出中文标签：
 
-| Windows 网卡类型 | Mac 提示 |
+| Windows 网卡类型（按名称/描述匹配） | 标签 |
 | --- | --- |
-| Wi-Fi / Wireless / WLAN / 802.11 | 优先映射为 `en0` |
-| Ethernet / LAN / 有线网卡 | 依次映射为 `en1`, `en2` |
-| Loopback / Npcap Loopback Adapter | 映射为 `lo0` |
-| Hyper-V / VMware / VirtualBox / VPN / Tunnel | 标注为虚拟/VPN，并分配 `enX` |
-| 未知类型 | 标注为自动推断，并分配 `enX` |
+| Loopback / Npcap Loopback Adapter | 回环接口 |
+| Hyper-V / VMware / VirtualBox / Virtual / VPN / Tap / Tunnel | 虚拟/VPN 接口 |
+| Wi-Fi / Wireless / WLAN / 802.11 | 无线网卡 |
+| Ethernet / Gigabit / Realtek / Intel(R) Ethernet / LAN | 有线网卡 |
+| 其他 | 可用抓包接口 |
+
+注意：虚拟/VPN 判断优先于有线判断，避免 “VMware Virtual Ethernet Adapter” 被误判为有线网卡。
 
 界面显示示例：
 
 ```text
-Wi-Fi 6 Adapter - Windows Wi-Fi 6 Adapter 对应 Mac en0（无线）
-Intel Ethernet - Windows Intel Ethernet 对应 Mac en1（有线）
-Npcap Loopback Adapter - Windows Npcap Loopback Adapter 对应 Mac lo0（回环）
+Wi-Fi 6 Adapter
+Intel(R) Ethernet Connection I219-V
+VMware Virtual Ethernet Adapter
+Npcap Loopback Adapter
 ```
 
-### 5.3 手动映射
+### 5.3 自动推荐网卡
 
-自动推断无法覆盖所有机器环境，因此 GUI 提供 `Mac映射` 输入框。用户可以手动输入 `en0`、`en1` 等别名并点击 `应用映射`，也可以点击 `自动推断` 恢复默认规则。
+界面提供 `自动推断` 能力，点击后按打分规则选择推荐网卡（`recommend_device_display`）：
 
-该映射只影响界面提示和用户操作习惯。真正开始抓包时，程序仍然使用 Npcap 返回的真实设备名传给 `pcap_open_live()`，保证底层兼容性。
+- 无线 / 有线网卡加分，物理接口命名（`enX`/`ethX`/`wlanX`）加分
+- 虚拟网卡、VPN/隧道、蓝牙、回环接口依次扣分
+
+推荐结果附带原因说明（`device_recommendation_reason`），例如“无线网卡，通常连接实验网段”。
+
+整个映射只影响界面显示与推荐，真正开始抓包时程序仍使用 Npcap 返回的真实设备名
+传给 `pcap_open_live()`，保证底层兼容性。
 
 ## 6. 协议解析与异常处理
 
@@ -123,7 +133,7 @@ alert tcp any any -> any 80 (content "GET"; msg "检测到 HTTP GET 请求";)
 
 GUI 使用 Tkinter 实现，主要区域包括：
 
-- 顶部工具栏：网卡选择、Mac 映射、BPF 输入、开始/停止、暂停刷新、清空、导出告警
+- 顶部工具栏：网卡选择、抓包过滤(BPF)、开始/停止、暂停刷新、清空、导出告警、打开/保存 pcap
 - 包列表：展示时间、源地址、目的地址、协议、长度和摘要
 - 协议详情：展示解析后的分层字段
 - 十六进制视图：展示原始包内容

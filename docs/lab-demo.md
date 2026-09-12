@@ -28,7 +28,7 @@ python main.py --list-devices
 
 - macOS 可能看到 `en0`、`en1`、`lo0`。
 - Windows 可能看到 `\Device\NPF_{GUID}`、`Wi-Fi`、`Ethernet`、`Npcap Loopback Adapter` 等。
-- Windows 下列表或 GUI 会出现类似“Windows Wi-Fi 对应 Mac en0”的提示。
+- Windows 下列表或 GUI 会为网卡显示可读名称与类型标签（无线网卡 / 有线网卡 / 回环接口 / 虚拟/VPN 接口）。
 
 对应实现：
 
@@ -70,9 +70,8 @@ python main.py
 
 1. 打开顶部“网卡”下拉框。
 2. macOS 上选择 `en0`。
-3. Windows 上选择提示为“对应 Mac en0”的主联网网卡，通常是 Wi-Fi；如果机器使用网线，则选择 Ethernet。
-4. 如果自动提示不符合实验机器，修改 `Mac映射` 输入框，例如填写 `en0`，点击 `应用映射`。
-5. 点击 `自动推断`，展示可恢复默认映射。
+3. Windows 上选择标注为“无线网卡”或“有线网卡”的主联网接口；不确定时点击 `自动推断` 让程序推荐。
+4. 观察网卡列表中的类型标签（无线网卡 / 有线网卡 / 回环接口 / 虚拟/VPN 接口）。
 
 实现逻辑：
 
@@ -278,7 +277,7 @@ Npcap/libpcap
 演示完成后应能证明：
 
 - 能枚举系统网卡。
-- 能在 Windows 下看到对应 Mac `en0` / `en1` / `lo0` 的提示。
+- 能在 Windows 下看到网卡的可读名称与类型标签（无线网卡 / 有线网卡 / 回环接口 / 虚拟/VPN）。
 - 能选择主联网网卡完成抓包。
 - 能通过 BPF 控制捕获范围。
 - 能解析 TCP、UDP、DNS、HTTP 等常见流量。

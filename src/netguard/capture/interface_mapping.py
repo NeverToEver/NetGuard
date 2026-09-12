@@ -182,12 +182,12 @@ def _windows_kind(device: CaptureDevice) -> str:
     text = f"{device.name} {device.description}".lower()
     if "loopback" in text:
         return "loopback"
+    if any(token in text for token in ("hyper-v", "vmware", "virtualbox", "virtual", "vpn", "tap", "tunnel")):
+        return "virtual"
     if any(token in text for token in ("wi-fi", "wifi", "wireless", "wlan", "802.11")):
         return "wifi"
     if any(token in text for token in ("ethernet", "gigabit", "realtek", "intel(r) ethernet", "lan")):
         return "ethernet"
-    if any(token in text for token in ("hyper-v", "vmware", "virtualbox", "virtual", "vpn", "tap", "tunnel")):
-        return "virtual"
     return "unknown"
 
 
