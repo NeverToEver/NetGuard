@@ -259,7 +259,7 @@ def _count_matches(rule_text: str, packets: list[PacketInfo]) -> int:
                     continue
             except ValueError:
                 continue
-        if content is not None and content not in p.payload:
+        if content is not None and content not in p.payload and content not in p.raw:
             continue
         count += 1
     return count

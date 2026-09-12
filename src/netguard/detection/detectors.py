@@ -12,6 +12,22 @@ _MAX_TRACKED_KEYS = 4096
 _MAX_SAMPLES_PER_KEY = 4096
 
 
+def _evict_oldest(events: dict, max_keys: int, *linked: dict) -> None:
+    """键数超上限时批量逐出最旧的 10%，避免每包 O(n) 的逐键 min 扫描。
+
+    ``linked`` 里的字典（如 _alerted / _port_counts）与 events 按键同步删除。
+    """
+    overflow = len(events) - max_keys
+    if overflow <= 0:
+        return
+    evict_count = max(overflow, max_keys // 10)
+    oldest = sorted(events, key=lambda k: events[k][-1] if events[k] else 0.0)[:evict_count]
+    for key in oldest:
+        events.pop(key, None)
+        for other in linked:
+            other.pop(key, None)
+
+
 def _is_tcp_syn(packet: PacketInfo) -> bool:
     if packet.protocol not in {"TCP", "HTTP"}:
         return False
@@ -84,10 +100,7 @@ class SynFloodDetector(BaseDetector):
             window.popleft()
 
     def _evict_if_needed(self) -> None:
-        while len(self._events) > self.max_keys:
-            oldest = min(self._events, key=lambda k: self._events[k][-1] if self._events[k] else 0.0)
-            self._events.pop(oldest, None)
-            self._alerted.pop(oldest, None)
+        _evict_oldest(self._events, self.max_keys, self._alerted)
 
     def reset(self) -> None:
         self._events.clear()
@@ -158,15 +171,144 @@ class PortScanDetector(BaseDetector):
         ]
 
     def _evict_if_needed(self) -> None:
-        while len(self._ports) > self.max_keys:
-            oldest = min(self._ports, key=lambda k: self._ports[k][-1][0] if self._ports[k] else 0.0)
-            self._ports.pop(oldest, None)
-            self._port_counts.pop(oldest, None)
-            self._alerted.pop(oldest, None)
+        _evict_oldest(self._ports, self.max_keys, self._port_counts, self._alerted)
 
     def reset(self) -> None:
         self._ports.clear()
         self._port_counts.clear()
+        self._alerted.clear()
+
+
+class IcmpFloodDetector(BaseDetector):
+    """窗口内同一 (源IP, 目的IP) 的 ICMP 包数量超阈值即告警。"""
+
+    name = "icmp-flood"
+    severity = "high"
+
+    def __init__(
+        self,
+        clock: Clock,
+        *,
+        window_seconds: float = 5.0,
+        threshold: int = 100,
+        max_keys: int = _MAX_TRACKED_KEYS,
+        max_samples: int = _MAX_SAMPLES_PER_KEY,
+    ) -> None:
+        super().__init__(clock)
+        self.window_seconds = window_seconds
+        self.threshold = threshold
+        self.max_keys = max_keys
+        self.max_samples = max_samples
+        self._events: dict[tuple[str, str], deque[float]] = defaultdict(deque)
+        self._alerted: dict[tuple[str, str], float] = {}
+
+    def observe(self, packet: PacketInfo) -> list[Alert]:
+        if packet.protocol != "ICMP":
+            return []
+        now = self._now(packet)
+        key = (packet.src, packet.dst)
+        window = self._events[key]
+        window.append(now)
+        self._trim(window, now)
+        self._evict_if_needed()
+        if len(window) < self.threshold:
+            return []
+        last = self._alerted.get(key)
+        if last is not None and now - last < self.window_seconds:
+            return []
+        self._alerted[key] = now
+        return [
+            self._alert(
+                packet,
+                f"疑似 ICMP Flood：{self.window_seconds:.0f}s 内 {len(window)} 个 ICMP 包 "
+                f"从 {packet.src} 发往 {packet.dst}",
+            )
+        ]
+
+    def _trim(self, window: deque[float], now: float) -> None:
+        cutoff = now - self.window_seconds
+        while window and window[0] < cutoff:
+            window.popleft()
+        while len(window) > self.max_samples:
+            window.popleft()
+
+    def _evict_if_needed(self) -> None:
+        _evict_oldest(self._events, self.max_keys, self._alerted)
+
+    def reset(self) -> None:
+        self._events.clear()
+        self._alerted.clear()
+
+
+class BruteForceDetector(BaseDetector):
+    """检测 SSH/FTP/Telnet 等明文服务的暴力破解：窗口内同一源对同一服务的高频连接。
+
+    用 SYN（不含 ACK）计数近似连接尝试次数；同一 (源IP, 目的IP, 服务端口)
+    在窗口内超过阈值即告警。
+    """
+
+    name = "brute-force"
+    severity = "high"
+
+    #: 常见明文认证服务端口
+    DEFAULT_SERVICE_PORTS = (21, 22, 23, 110, 143, 3306, 3389, 5900)
+
+    def __init__(
+        self,
+        clock: Clock,
+        *,
+        window_seconds: float = 60.0,
+        threshold: int = 10,
+        service_ports: tuple[int, ...] = DEFAULT_SERVICE_PORTS,
+        max_keys: int = _MAX_TRACKED_KEYS,
+        max_samples: int = _MAX_SAMPLES_PER_KEY,
+    ) -> None:
+        super().__init__(clock)
+        self.window_seconds = window_seconds
+        self.threshold = threshold
+        self.service_ports = frozenset(service_ports)
+        self.max_keys = max_keys
+        self.max_samples = max_samples
+        self._events: dict[tuple[str, str, int], deque[float]] = defaultdict(deque)
+        self._alerted: dict[tuple[str, str, int], float] = {}
+
+    def observe(self, packet: PacketInfo) -> list[Alert]:
+        if packet.dst_port not in self.service_ports:
+            return []
+        if not _is_tcp_syn(packet):
+            return []
+        now = self._now(packet)
+        key = (packet.src, packet.dst, packet.dst_port)
+        window = self._events[key]
+        window.append(now)
+        self._trim(window, now)
+        self._evict_if_needed()
+        if len(window) < self.threshold:
+            return []
+        last = self._alerted.get(key)
+        if last is not None and now - last < self.window_seconds:
+            return []
+        self._alerted[key] = now
+        return [
+            self._alert(
+                packet,
+                f"疑似暴力破解：{self.window_seconds:.0f}s 内 {len(window)} 次连接 "
+                f"{packet.dst}:{packet.dst_port}（源 {packet.src}）",
+            )
+        ]
+
+    def _trim(self, window: deque[float], now: float) -> None:
+        cutoff = now - self.window_seconds
+        while window and window[0] < cutoff:
+            window.popleft()
+        while len(window) > self.max_samples:
+            window.popleft()
+
+    def _evict_if_needed(self) -> None:
+        _evict_oldest(self._events, self.max_keys, self._alerted)
+
+    def reset(self) -> None:
+        self._events.clear()
         self._alerted.clear()
 
 
@@ -240,10 +382,7 @@ class DnsTunnelDetector(BaseDetector):
         return alerts
 
     def _evict_if_needed(self) -> None:
-        while len(self._suffix_events) > self.max_keys:
-            oldest = min(self._suffix_events, key=lambda k: self._suffix_events[k][-1] if self._suffix_events[k] else 0.0)
-            self._suffix_events.pop(oldest, None)
-            self._alerted.pop(oldest, None)
+        _evict_oldest(self._suffix_events, self.max_keys, self._alerted)
 
     def reset(self) -> None:
         self._suffix_events.clear()

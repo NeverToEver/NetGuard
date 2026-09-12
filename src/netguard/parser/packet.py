@@ -140,8 +140,26 @@ def _parse_tcp(info: PacketInfo, data: bytes) -> PacketInfo:
     }
     if payload and (src_port in HTTP_PORTS or dst_port in HTTP_PORTS):
         _parse_http(info, payload)
+    elif payload and _looks_like_http(payload):
+        # 非标准端口上的 HTTP：按内容探测（请求行/状态行），端口判断仍是快速路径
+        _parse_http(info, payload)
     info.summary = info.summary or f"TCP {src_port} -> {dst_port} {','.join(flags) or 'NONE'}"
     return info
+
+
+_HTTP_METHODS = (
+    b"GET", b"POST", b"PUT", b"DELETE", b"HEAD", b"OPTIONS",
+    b"PATCH", b"CONNECT", b"TRACE",
+)
+
+
+def _looks_like_http(payload: bytes) -> bool:
+    """基于首行内容探测 HTTP，用于识别运行在非标准端口上的 HTTP 服务。"""
+    first = payload.split(b"\r\n", 1)[0]
+    if first.startswith(b"HTTP/"):
+        return True
+    method, _, rest = first.partition(b" ")
+    return method in _HTTP_METHODS and rest.rstrip().endswith((b"HTTP/1.0", b"HTTP/1.1", b"HTTP/2", b"HTTP/3"))
 
 
 def _parse_udp(info: PacketInfo, data: bytes) -> PacketInfo:
@@ -166,8 +184,37 @@ def _parse_udp(info: PacketInfo, data: bytes) -> PacketInfo:
     }
     if src_port == 53 or dst_port == 53:
         _parse_dns(info, payload)
+    elif payload and _looks_like_dns(payload):
+        # 非标准端口上的 DNS：按报文结构探测，端口 53 仍是快速路径
+        _parse_dns(info, payload)
     info.summary = info.summary or f"UDP {src_port} -> {dst_port}"
     return info
+
+
+def _looks_like_dns(payload: bytes) -> bool:
+    """基于报文结构探测 DNS：标志位合法且首个查询名能以 0 终止、不带指针。"""
+    if len(payload) < 13:
+        return False
+    flags = payload[2:4]
+    opcode = (flags[0] >> 3) & 0x0F
+    if opcode > 5:  # query/status/notify/update 之外的操作码视为非 DNS
+        return False
+    if flags[1] & 0x0F > 5:  # rcode 超出常见范围
+        return False
+    qdcount, _, _, _ = struct.unpack("!HHHH", payload[4:12])
+    if qdcount < 1 or qdcount > 20:
+        return False
+    offset = 12
+    for _ in range(64):  # 域名标签数上限，防止异常数据死循环
+        if offset >= len(payload):
+            return False
+        length = payload[offset]
+        if length == 0:
+            return offset + 5 <= len(payload)  # 0 终止符 + qtype/qclass
+        if length & 0xC0 or length > 63:
+            return False
+        offset += 1 + length
+    return False
 
 
 def _parse_icmp(info: PacketInfo, data: bytes) -> PacketInfo:

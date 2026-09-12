@@ -287,6 +287,8 @@ class PcapBackend:
                         break
                 rc = self.lib.pcap_next_ex(handle, ctypes.byref(header), ctypes.byref(packet))
                 if rc == 1:
+                    if not packet:
+                        continue  # 防御：rc==1 但指针为 NULL（不对外抛异常打断抓包）
                     h = header.contents
                     data = ctypes.string_at(packet, h.caplen)
                     ts = float(h.ts.tv_sec) + float(h.ts.tv_usec) / 1_000_000.0

@@ -285,7 +285,7 @@ class NetGuardApp(tk.Tk):
         self.after(100, self._load_devices)
         self.after(200, self._tick)
         if self.theme_mode.get() == "system":
-            self.after(SYSTEM_THEME_POLL_MS, self._poll_system_theme)
+            self._start_system_theme_poll()
         self.protocol("WM_DELETE_WINDOW", self._exit)
 
     def _resolve_dark(self) -> bool:
@@ -342,12 +342,18 @@ class NetGuardApp(tk.Tk):
         self.theme_mode.set(mode)
         self._apply_theme()
         if mode == "system":
-            self.after(SYSTEM_THEME_POLL_MS, self._poll_system_theme)
+            self._start_system_theme_poll()
+
+    def _start_system_theme_poll(self) -> None:
+        """启动系统主题轮询；用哨兵防止重复启动叠加多条轮询链。"""
+        if getattr(self, "_system_theme_poll_active", False):
+            return
+        self._system_theme_poll_active = True
+        self.after(SYSTEM_THEME_POLL_MS, self._poll_system_theme)
 
     def _poll_system_theme(self) -> None:
-        if self.__dict__.get("_destroyed", False):
-            return
-        if self.theme_mode.get() != "system":
+        if self.__dict__.get("_destroyed", False) or self.theme_mode.get() != "system":
+            self._system_theme_poll_active = False
             return
         if detect_system_dark() != self.dark_mode.get():
             self._apply_theme()
@@ -395,7 +401,8 @@ class NetGuardApp(tk.Tk):
             pass
         window.sort_column = self._sort_column
         window.sort_descending = self._sort_descending
-        window.last_device = self.device_var.get() if hasattr(self, "device_var") else ""
+        # 保存内部设备名而非显示名，恢复时按 device.name 匹配（两者在 Windows 上不同）
+        window.last_device = self._selected_device_name() if hasattr(self, "device_var") else ""
         if hasattr(self, "bpf_var"):
             window.bpf = self.bpf_var.get()
         if hasattr(self, "display_filter"):
@@ -431,7 +438,8 @@ class NetGuardApp(tk.Tk):
         self.device_box.grid(row=0, column=1, sticky=tk.EW, padx=(0, 10))
         self.device_box.bind("<<ComboboxSelected>>", lambda _: self._on_device_selected())
         ttk.Label(capture_controls, text="抓包过滤(BPF)", style="Muted.TLabel").grid(row=0, column=2, sticky=tk.W, padx=(0, 6))
-        self.bpf_var = tk.StringVar(value=self._config.window.bpf or "tcp or udp")
+        # 空 BPF 表示抓全部流量，不要用 or 回退默认值
+        self.bpf_var = tk.StringVar(value=self._config.window.bpf)
         bpf_entry = ttk.Entry(capture_controls, textvariable=self.bpf_var, style="Filter.TEntry")
         self.bpf_var_entry = bpf_entry
         bpf_entry.grid(
@@ -643,7 +651,7 @@ class NetGuardApp(tk.Tk):
         ]
         for widget, text in pairs:
             if widget is not None:
-                self._tooltips.append(Tooltip(widget, text))
+                self._tooltips.append(Tooltip(widget, text, dark=self.dark_mode.get()))
 
     def _build_menu(self) -> None:
         menubar = tk.Menu(self, tearoff=0)
@@ -653,6 +661,7 @@ class NetGuardApp(tk.Tk):
         file_menu.add_command(label="打开 pcap…", accelerator="Ctrl+O", command=self._open_pcap)
         file_menu.add_command(label="保存 pcap…", accelerator="Ctrl+S", command=self._save_pcap)
         file_menu.add_command(label="导出告警…", accelerator="Ctrl+E", command=self._export_alerts)
+        file_menu.add_command(label="导出数据包 CSV…", command=self._export_packets_csv)
         file_menu.add_separator()
         file_menu.add_command(label="退出", accelerator="Ctrl+Q", command=self._exit)
         menubar.add_cascade(label="文件", menu=file_menu)
@@ -733,11 +742,82 @@ class NetGuardApp(tk.Tk):
         menu.add_separator()
         menu.add_command(label="用摘要筛选", command=self._filter_by_selected_summary)
         menu.add_command(label="定位告警", command=self._jump_to_alert_packet)
+        menu.add_separator()
+        menu.add_command(label="自适应列宽", command=self._autofit_columns)
+        menu.add_command(label="导出数据包 CSV…", command=self._export_packets_csv)
         self._table_menu = menu
         self.table.bind("<Button-3>", self._popup_table_menu)
         if sys.platform == "darwin":
             self.table.bind("<Control-Button-1>", self._popup_table_menu)
         self.table.bind("<Control-c>", lambda _e: self._copy_selected("row"))
+        self.table.bind("<ButtonRelease-1>", self._maybe_autofit_separator, add="+")
+
+    def _autofit_columns(self) -> None:
+        """按当前表格内容计算每列宽度（双击表头分隔线或右键菜单触发）。"""
+        padding = 18
+        for col in self.table["columns"]:
+            try:
+                header = self.table.heading(col, "text").replace(" ▲", "").replace(" ▼", "")
+            except tk.TclError:
+                continue
+            max_len = len(str(header))
+            for row in self.table.get_children():
+                value = self.table.set(row, col)
+                if len(value) > max_len:
+                    max_len = len(value)
+            width = max(48, min(560, max_len * 7 + padding))
+            try:
+                self.table.column(col, width=width)
+            except tk.TclError:
+                continue
+        self._schedule_config_save()
+
+    def _maybe_autofit_separator(self, event) -> None:
+        """双击表头分隔线时对该列做内容自适应。"""
+        if self.table.identify_region(event.x, event.y) != "separator":
+            return
+        if getattr(self, "_last_separator_click", None):
+            last_time, last_x = self._last_separator_click
+            if event.time - last_time < 500 and abs(event.x - last_x) < 8:
+                col_id = self.table.identify_column(event.x)
+                if col_id:
+                    self._autofit_columns()
+                self._last_separator_click = None
+                return
+        self._last_separator_click = (event.time, event.x)
+
+    def _export_packets_csv(self) -> None:
+        if not self.events:
+            messagebox.showinfo("导出 CSV", "当前没有可导出的数据包。", parent=self)
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV 文件", "*.csv"), ("所有文件", "*.*")],
+        )
+        if not path:
+            return
+        # 在主线程快照（遵循过滤条件），后台只做文件写入
+        rows = [self.events[idx - self.event_offset].packet for idx in self.filtered
+                if 0 <= idx - self.event_offset < len(self.events)]
+
+        def work() -> int:
+            import csv
+
+            with open(path, "w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["时间", "源地址", "源端口", "目的地址", "目的端口", "协议", "长度", "摘要"])
+                for packet in rows:
+                    writer.writerow([
+                        f"{packet.timestamp:.3f}", packet.src, packet.src_port or "",
+                        packet.dst, packet.dst_port or "", packet.protocol,
+                        packet.length, packet.summary,
+                    ])
+            return len(rows)
+
+        def done(count: object) -> None:
+            self._log(f"已导出 {int(count)} 条数据包到 {path}")  # type: ignore[arg-type]
+
+        self._run_in_background(work, done, "正在导出 CSV…", "导出错误")
 
     def _popup_table_menu(self, event) -> None:
         row = self.table.identify_row(event.y)
@@ -864,16 +944,13 @@ class NetGuardApp(tk.Tk):
 
     def _load_devices(self) -> None:
         self._log("正在加载网卡...")
-        thread = threading.Thread(target=self._load_devices_worker, name="netguard-device-loader", daemon=True)
-        thread.start()
-
-    def _load_devices_worker(self) -> None:
-        try:
-            devices = self.pipeline.list_devices()
-        except Exception as exc:
-            self.after(0, self._show_device_error, str(exc))
-            return
-        self.after(0, self._set_devices, devices)
+        # 走 _run_in_background：结果经 _background_queue 由主线程派发，不在子线程碰 Tk
+        self._run_in_background(
+            self.pipeline.list_devices,
+            self._set_devices,
+            "正在加载网卡…",
+            "网卡加载失败",
+        )
 
     def _set_devices(self, devices) -> None:
         self.device_displays = build_device_displays(devices)
@@ -1231,17 +1308,14 @@ class NetGuardApp(tk.Tk):
             messagebox.showinfo("自动生成规则", "当前还没有可用于生成 IDS 规则的 TCP、UDP、HTTP 或 DNS 数据包。")
             return
         self._log("正在分析数据包生成 IDS 规则建议...")
-        thread = threading.Thread(target=self._compute_rule_suggestions, name="netguard-suggestions", daemon=True)
-        thread.start()
-
-    def _compute_rule_suggestions(self) -> None:
-        try:
-            suggestions = generate_rule_suggestions((event.packet for event in self.events), limit=8)
-        except Exception:
-            logger.exception("规则建议生成失败")
-            self.after(0, lambda: messagebox.showerror("自动生成规则", "生成失败，请重试。"))
-            return
-        self.after(0, lambda: self._show_suggestions_result(suggestions))
+        # 主线程快照，避免后台线程遍历 self.events 时与 _tick 的裁剪竞争
+        packets = [event.packet for event in self.events]
+        self._run_in_background(
+            lambda: generate_rule_suggestions(packets, limit=8),
+            self._show_suggestions_result,
+            "正在生成规则建议…",
+            "自动生成规则",
+        )
 
     def _show_suggestions_result(self, suggestions: list) -> None:
         if not suggestions:
@@ -1382,11 +1456,7 @@ class NetGuardApp(tk.Tk):
                 start_idx = self.event_offset + len(self.events)
                 self.events.extend(events)
                 if len(self.events) > MAX_EVENTS:
-                    trim_count = len(self.events) - MAX_EVENTS
-                    del self.events[:trim_count]
-                    self.event_offset += trim_count
-                    self.filtered = [idx for idx in self.filtered if idx >= self.event_offset]
-                    self.alert_packet_indices = [idx for idx in self.alert_packet_indices if idx >= self.event_offset]
+                    self._drop_oldest_events(len(self.events) - MAX_EVENTS)
                 if not self.paused:
                     self._append_alerts(events, start_idx)
                     self._append_events(events, start_idx)
@@ -1472,6 +1542,25 @@ class NetGuardApp(tk.Tk):
             del self.alert_packet_indices[-extra:]
             self._log(f"告警已裁剪 {extra} 条")
 
+    def _drop_oldest_events(self, trim_count: int) -> None:
+        """裁剪最旧的 trim_count 个事件，并同步清理表格行与各类索引。
+
+        表格中对应被裁事件的行必须一并删除，否则它们成为永远选不中的孤儿行，
+        会使 Treeview 行数突破 MAX_TABLE_ROWS 持续增长。
+        """
+        old_offset = self.event_offset
+        del self.events[:trim_count]
+        self.event_offset += trim_count
+        self.filtered = [idx for idx in self.filtered if idx >= self.event_offset]
+        self.alert_packet_indices = [idx for idx in self.alert_packet_indices if idx >= self.event_offset]
+        self._error_packet_indices = [idx for idx in self._error_packet_indices if idx >= self.event_offset]
+        if self._refilter_queue:
+            self._refilter_queue = [idx for idx in self._refilter_queue if idx >= self.event_offset]
+        rows_set = set(self.table.get_children())
+        orphan_iids = [str(idx) for idx in range(old_offset, self.event_offset) if str(idx) in rows_set]
+        if orphan_iids:
+            self.table.delete(*orphan_iids)
+
     def _show_selected(self) -> None:
         selected = self.table.selection()
         if not selected:
@@ -1532,6 +1621,11 @@ class NetGuardApp(tk.Tk):
         self._filter_after_id = self.after(300, self._refilter)
 
     def _refilter(self) -> None:
+        if self._filter_after_id is not None:
+            try:
+                self.after_cancel(self._filter_after_id)
+            except tk.TclError:
+                pass
         self._filter_after_id = None
         if self._refilter_after_id is not None:
             try:
@@ -1994,12 +2088,23 @@ class TrafficGenDialog(tk.Toplevel):
         self._listbox.bind("<space>", self._toggle_focused_template)
         self._listbox.bind("<Return>", self._toggle_focused_template)
         self._listbox.bind("<Escape>", lambda _e: self._on_close())
-        wire_dialog_theme(self, parent, [self._capture_warning, self._listbox])
-        self.after(200, self._check_capture_state)
+        # _capture_warning 是警示条（固定黄底），不交给主题统一换色，避免主题切换后丢失警示样式
+        wire_dialog_theme(self, parent, [self._listbox])
+        self._schedule(200, self._check_capture_state)
 
     def _schedule(self, delay_ms: int, callback) -> None:
-        aid = self.after(delay_ms, callback)
-        self._after_ids.append(aid)
+        """调度回调并登记 id，已触发的 id 随即移出列表，避免 _after_ids 只增不减。"""
+        after_ids = self._after_ids
+
+        def wrapped() -> None:
+            try:
+                after_ids.remove(aid)
+            except ValueError:
+                pass
+            callback()
+
+        aid = self.after(delay_ms, wrapped)
+        after_ids.append(aid)
 
     def _on_close(self) -> None:
         if self._generator.running:

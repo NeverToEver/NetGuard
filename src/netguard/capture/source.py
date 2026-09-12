@@ -117,11 +117,10 @@ class CaptureSource:
             for raw in read_pcap(path):
                 if self._stop.is_set():
                     return
-                if not self.enqueue_raw(raw):
-                    # 队列打满时短暂退避等待解析线程消费，且不重复计丢包
-                    while not self._stop.is_set() and not self.enqueue_raw(raw, count_drop=False):
-                        self._stop.wait(0.05)
-                    if self._stop.is_set():
+                # 队列打满时短暂退避等待解析线程消费，且不重复计丢包；
+                # 退避期间成功入队的包直接继续处理下一包，不能被误判丢弃
+                while not self.enqueue_raw(raw, count_drop=False):
+                    if self._stop.wait(0.05):
                         return
         except PcapFileError as exc:
             logger.error("pcap 回放失败：%s", exc)

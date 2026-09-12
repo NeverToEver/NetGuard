@@ -8,12 +8,20 @@ from __future__ import annotations
 
 from netguard.clock import Clock
 from netguard.detection.base import BaseDetector, Detector
-from netguard.detection.detectors import DnsTunnelDetector, PortScanDetector, SynFloodDetector
+from netguard.detection.detectors import (
+    BruteForceDetector,
+    DnsTunnelDetector,
+    IcmpFloodDetector,
+    PortScanDetector,
+    SynFloodDetector,
+)
 
 __all__ = [
     "BaseDetector",
+    "BruteForceDetector",
     "Detector",
     "DnsTunnelDetector",
+    "IcmpFloodDetector",
     "PortScanDetector",
     "SynFloodDetector",
     "build_default_detectors",
@@ -24,6 +32,8 @@ DEFAULT_DETECTOR_CONFIG: dict[str, dict[str, float | int]] = {
     "syn-flood": {"window_seconds": 5.0, "threshold": 100},
     "port-scan": {"window_seconds": 10.0, "threshold": 20},
     "dns-tunnel": {"window_seconds": 10.0, "rate_threshold": 50},
+    "icmp-flood": {"window_seconds": 5.0, "threshold": 100},
+    "brute-force": {"window_seconds": 60.0, "threshold": 10},
 }
 
 
@@ -39,4 +49,6 @@ def build_default_detectors(
         SynFloodDetector(clock, **config["syn-flood"]),
         PortScanDetector(clock, **config["port-scan"]),
         DnsTunnelDetector(clock, **config["dns-tunnel"]),
+        IcmpFloodDetector(clock, **config["icmp-flood"]),
+        BruteForceDetector(clock, **config["brute-force"]),
     ]

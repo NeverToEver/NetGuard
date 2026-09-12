@@ -65,9 +65,17 @@ _RULE_RE = re.compile(
 
 
 class RuleEngine:
+    """Snort 风格规则引擎：协议桶 + 端口二级索引。
+
+    索引结构为 ``{protocol: {port_key: (Rule, ...)}}``，其中 port_key 取规则的
+    数字端口（src_port 或 dst_port，规则通常只固定其中一个，另一个为 ``any``），
+    端口非数字或 ``<>`` 双向规则归入 ``"any"`` 桶。匹配时只取数据包 src_port /
+    dst_port 命中的桶与 ``"any"`` 桶，把候选集从同协议全部规则缩减到端口相关规则。
+    """
+
     def __init__(self, rules: list[str] | None = None, clock: Clock = system_clock) -> None:
         self.rules: list[Rule] = []
-        self.index: dict[str, tuple[Rule, ...]] = {}
+        self.index: dict[str, dict[str, tuple[Rule, ...]]] = {}
         self._clock = clock
         self._lock = threading.Lock()
         if rules:
@@ -84,10 +92,13 @@ class RuleEngine:
                 parsed.append(parse_rule(stripped))
             except RuleParseError:
                 failed += 1
-        _temp: dict[str, list[Rule]] = {}
+        _temp: dict[str, dict[str, list[Rule]]] = {}
         for rule in parsed:
-            _temp.setdefault(rule.protocol, []).append(rule)
-        index: dict[str, tuple[Rule, ...]] = {proto: tuple(rules) for proto, rules in _temp.items()}
+            _temp.setdefault(rule.protocol, {}).setdefault(_rule_port_key(rule), []).append(rule)
+        index: dict[str, dict[str, tuple[Rule, ...]]] = {
+            proto: {port: tuple(bucket) for port, bucket in ports.items()}
+            for proto, ports in _temp.items()
+        }
         # 原子替换：match() 在锁内读取 self.index，此处双赋值在同一个锁内完成，不会出现半替换状态
         with self._lock:
             self.rules = parsed
@@ -102,21 +113,13 @@ class RuleEngine:
     ) -> list[Alert]:
         protocol = packet.protocol.upper()
         with self._lock:
-            candidates = self.index.get(protocol, ())
-            if protocol != "ANY":
-                any_rules = self.index.get("ANY", ())
-                if any_rules:
-                    candidates = candidates + any_rules
-            if protocol == "HTTP":
-                tcp_rules = self.index.get("TCP", ())
-                if tcp_rules:
-                    candidates = candidates + tcp_rules
-            elif protocol == "DNS":
-                udp_rules = self.index.get("UDP", ())
-                if udp_rules:
-                    candidates = candidates + udp_rules
+            candidates = self._candidates_for(protocol, packet)
         alerts: list[Alert] = []
         for rule in candidates:
+            # content 规则按会话去重（单包路径与流路径共用同一去重集），
+            # 避免长连接里每个含关键字的包都重复告警
+            if matched is not None and rule.content and _rule_key(rule) in matched:
+                continue
             if self._matches(rule, packet):
                 if matched is not None and rule.content:
                     matched.add(_rule_key(rule))
@@ -125,6 +128,30 @@ class RuleEngine:
             if self._matches_stream(rule, packet, stream, matched):
                 alerts.append(self._build_alert(rule, packet))
         return alerts
+
+    def _candidates_for(self, protocol: str, packet: PacketInfo) -> tuple[Rule, ...]:
+        ports: list[str] = ["any"]
+        if packet.src_port is not None:
+            ports.append(str(packet.src_port))
+        if packet.dst_port is not None and packet.dst_port != packet.src_port:
+            ports.append(str(packet.dst_port))
+        protocols = [protocol]
+        if protocol != "ANY":
+            protocols.append("ANY")
+        if protocol == "HTTP":
+            protocols.append("TCP")
+        elif protocol == "DNS":
+            protocols.append("UDP")
+        candidates: list[Rule] = []
+        for proto in protocols:
+            buckets = self.index.get(proto)
+            if not buckets:
+                continue
+            for port in ports:
+                rules = buckets.get(port)
+                if rules:
+                    candidates.extend(rules)
+        return tuple(candidates)
 
     def _matches_stream(
         self,
@@ -185,6 +212,20 @@ def _rule_key(rule: Rule) -> str:
         f"{rule.protocol}|{rule.src}|{rule.src_port}|{rule.direction}"
         f"|{rule.dst}|{rule.dst_port}|{rule.content!r}"
     )
+
+
+def _rule_port_key(rule: Rule) -> str:
+    """二级索引键：取规则固定的数字端口，取不到（any/非数字/双向）归入 "any" 桶。
+
+    规则写法上 src_port/dst_port 通常只有一个被固定；``<>`` 双向规则的端口
+    两个方向语义不同，无法按单边端口索引，全部留在 "any" 桶保证不漏匹配。
+    """
+    if rule.direction == "<>":
+        return "any"
+    for value in (rule.src_port, rule.dst_port):
+        if value.isdigit():
+            return value
+    return "any"
 
 
 def parse_rule(text: str) -> Rule:

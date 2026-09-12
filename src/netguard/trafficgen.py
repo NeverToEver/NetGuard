@@ -91,6 +91,15 @@ TEMPLATES: list[PacketTemplate] = [
     PacketTemplate("icmp-reply", "ICMP Echo Reply", "ICMP", "normal",
                    "ICMP Echo Reply (ping 响应)",
                    lambda: _eth(_ipv4(struct.pack("!BBHHH", 0, 0, 0, 1, 1) + b"pong!", proto=1))),
+    PacketTemplate("http-alt-port", "HTTP 非标准端口", "HTTP", "normal",
+                   "HTTP 请求到非标准端口 8888（验证内容探测识别）",
+                   lambda: _eth(_ipv4(_tcp(b"GET / HTTP/1.1\r\nHost: alt.example.com\r\n\r\n", dst_port=8888)))),
+    PacketTemplate("dns-alt-port", "DNS 非标准端口", "DNS", "normal",
+                   "DNS 查询走非标准端口 5353（验证内容探测识别）",
+                   lambda: _eth(_ipv4(_udp(_dns_query(), dst_port=5353), proto=17))),
+    PacketTemplate("ssh-conn", "SSH 连接尝试", "TCP", "normal",
+                   "到 22 端口的 TCP SYN（连续勾选发送可触发暴力破解告警）",
+                   lambda: _eth(_ipv4(_tcp(b"", src_port=20000, dst_port=22, flags=0x02)))),
 
     # --- Abnormal packets ---
     PacketTemplate("abn-eth", "截断 Ethernet", "ETHERNET", "abnormal",

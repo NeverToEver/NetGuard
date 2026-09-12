@@ -219,7 +219,8 @@ class PacketPipeline:
     # --- 处理线程 -------------------------------------------------------------
 
     def _parse_worker(self) -> None:
-        while not self._stop.is_set():
+        # stop 后仍要把队列里已捕获的包解析完，避免停止时静默丢失尾部数据
+        while not self._stop.is_set() or not self.source.raw_queue.empty():
             try:
                 raw = self.source.raw_queue.get(timeout=0.1)
             except queue.Empty:

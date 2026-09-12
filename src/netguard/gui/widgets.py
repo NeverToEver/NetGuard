@@ -10,10 +10,11 @@ class Tooltip:
     键盘快捷键等信息，避免用户只能靠猜。
     """
 
-    def __init__(self, widget: tk.Widget, text: str, *, delay_ms: int = 500) -> None:
+    def __init__(self, widget: tk.Widget, text: str, *, delay_ms: int = 500, dark: bool = False) -> None:
         self.widget = widget
         self.text = text
         self.delay_ms = delay_ms
+        self.dark = dark
         self._after_id: str | None = None
         self._tip: tk.Toplevel | None = None
         widget.bind("<Enter>", self._schedule, add="+")
@@ -43,9 +44,13 @@ class Tooltip:
         tip = tk.Toplevel(self.widget)
         tip.wm_overrideredirect(True)
         tip.wm_geometry(f"+{x}+{y}")
+        # 跟随当前主题配色，而非固定深色
+        from netguard.gui.theme import build_colors
+
+        colors = build_colors(self.dark)
         label = tk.Label(
             tip, text=self.text, justify=tk.LEFT,
-            background="#2b2b2b", foreground="#f0f0f0",
+            background=colors["field_alt"], foreground=colors["text"],
             relief=tk.SOLID, borderwidth=1, padx=6, pady=3,
         )
         label.pack()

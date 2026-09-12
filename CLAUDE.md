@@ -53,7 +53,7 @@ main.py                          # Entry point: CLI args → console or GUI
     │   └── suggestions.py       # rule suggestions from observed traffic
     ├── detection/
     │   ├── base.py              # Detector protocol + BaseDetector
-    │   └── detectors.py         # SynFlood / PortScan / DnsTunnel detectors
+    │   └── detectors.py         # SynFlood / PortScan / DnsTunnel / IcmpFlood / BruteForce detectors
     ├── session/
     │   └── tracker.py           # TCP session reassembly (out-of-order, fragment stitching)
     ├── statistics/

@@ -43,9 +43,24 @@ class TrafficStats:
             self._trim(now)
 
     def snapshot(self) -> TrafficSnapshot:
-        now = self._clock()
         with self._lock:
-            self._trim(now)
+            if not self._recent:
+                return TrafficSnapshot(
+                    total_packets=self.total_packets,
+                    total_bytes=self.total_bytes,
+                    protocol_counts=dict(self.protocol_counts),
+                    active_sessions=self.active_sessions,
+                    packets_per_second=0.0,
+                    bytes_per_second=0.0,
+                )
+            # trim 基准必须与窗口数据同一时间轴：_recent 里是包时间戳。
+            # 包时间戳落后于墙钟超过一个窗口宽度（典型：离线回放历史 pcap，
+            # 或刚从挂起恢复）时，墙钟基准会把窗口整体清空且永远追不上——
+            # 此时回退到包时间轴计算速率；正常实时抓包下用墙钟，保证空闲归零。
+            clock_now = self._clock()
+            latest = self._recent[-1][0]
+            window_base = latest if clock_now - latest > self.rate_window_seconds else clock_now
+            self._trim(window_base)
             if not self._recent:
                 return TrafficSnapshot(
                     total_packets=self.total_packets,

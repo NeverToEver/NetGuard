@@ -411,3 +411,118 @@ def test_stream_match_alerts_only_once_per_session() -> None:
     follow_up = tcp_packet(seq=7, payload=b" more data")
     session = tracker.update(follow_up)
     assert engine.match(follow_up, stream=session.stream, matched=session.matched_rules) == []
+
+
+# --- 回归：规则引擎二级端口索引与会话级 content 去重 ---
+
+def test_port_index_keeps_only_relevant_candidates() -> None:
+    rules = [f'alert tcp any any -> any {1000 + i} (msg "r{i}";)' for i in range(200)]
+    engine = RuleEngine(rules)
+    packet = PacketInfo(
+        timestamp=1.0, length=54, raw=b"", protocol="TCP",
+        src="10.0.0.1", dst="10.0.0.2", src_port=40000, dst_port=1050,
+    )
+    # 应只命中 1050 一条，且候选集大幅缩小（内部验证索引生效）
+    alerts = engine.match(packet)
+    assert len(alerts) == 1
+    assert alerts[0].msg == "r50"
+    candidates = engine._candidates_for("TCP", packet)
+    assert len(candidates) < 10  # 200 条规则里只有 1050 桶命中
+
+
+def test_port_index_bidirectional_rules_still_match() -> None:
+    engine = RuleEngine(['alert tcp any 80 <> any any (msg "bidir";)'])
+    packet = PacketInfo(
+        timestamp=1.0, length=54, raw=b"", protocol="TCP",
+        src="10.0.0.1", dst="10.0.0.2", src_port=40000, dst_port=80,
+    )
+    assert len(engine.match(packet)) == 1
+    reverse = PacketInfo(
+        timestamp=1.0, length=54, raw=b"", protocol="TCP",
+        src="10.0.0.2", dst="10.0.0.1", src_port=80, dst_port=40000,
+    )
+    assert len(engine.match(reverse)) == 1
+
+
+def test_single_packet_content_alerts_deduped_per_session() -> None:
+    engine = RuleEngine(['alert tcp any any -> any 80 (content "GET"; msg "http get";)'])
+    matched: set[str] = set()
+
+    def make_packet() -> PacketInfo:
+        return PacketInfo(
+            timestamp=1.0, length=54, raw=b"", protocol="TCP",
+            src="10.0.0.1", dst="10.0.0.2", src_port=40000, dst_port=80,
+            payload=b"GET / HTTP/1.1\r\n\r\n",
+        )
+
+    assert len(engine.match(make_packet(), matched=matched)) == 1
+    # 同一会话后续含关键字的包不再重复告警
+    assert engine.match(make_packet(), matched=matched) == []
+
+
+# --- 回归：离线回放（历史时间戳）下的会话清理与速率 ---
+
+def test_stats_snapshot_uses_packet_timeline_for_replay() -> None:
+    """回放旧 pcap（包时间戳远早于墙钟）时，速率窗口不被墙钟清空。"""
+    class FakeClock:
+        def __call__(self) -> float:
+            return 1_800_000_000.0  # 墙钟在“未来”
+
+    stats = TrafficStats(clock=FakeClock())
+    for i in range(10):
+        packet = PacketInfo(timestamp=1_000_000.0 + i * 0.1, length=100, raw=b"", protocol="TCP")
+        stats.update(packet)
+    # 包时间轴落后墙钟超过窗口宽度时回退到包时间轴：10 包 / 0.9s ≈ 11 pps
+    snap = stats.snapshot()
+    assert snap.packets_per_second > 0
+
+
+def test_stats_snapshot_idle_returns_zero_rate() -> None:
+    """实时抓包语义：包时间戳等于墙钟，空闲超过窗口后速率归零。"""
+    class FakeClock:
+        value = 1_000_000.0
+
+        def __call__(self) -> float:
+            return self.value
+
+    clock = FakeClock()
+    stats = TrafficStats(clock=clock)
+    stats.update(PacketInfo(timestamp=None, length=100, raw=b"", protocol="TCP"))
+    # 空闲期间 wall-clock 速率归零：通过再打一包把窗口尾推到当前时刻验证
+    clock.value += 60.0  # 空闲 60 秒，超过速率窗口
+    stats.update(PacketInfo(timestamp=None, length=100, raw=b"", protocol="TCP"))
+    snap = stats.snapshot()
+    # 旧包（60s 前）已被墙钟基准剔除，窗口只剩刚到的 1 包
+    assert snap.total_packets == 2
+    assert snap.packets_per_second == 1.0  # 单包窗口 elapsed=1.0 → 1 pps，而非 2/60≈0
+
+
+def test_session_cleanup_after_fin_uses_packet_timestamp() -> None:
+    """离线回放：FIN 触发的清理不能用墙钟，否则全部存活会话被误删。"""
+    from netguard.processing import PacketProcessor
+    from netguard.capture.pcap import RawPacket
+    import struct
+
+    class FakeClock:
+        def __call__(self) -> float:
+            return 1_800_000_000.0
+
+    processor = PacketProcessor(clock=FakeClock())
+
+    def tcp_frame(src: bytes, dst: bytes, src_port: int, dst_port: int, flags: int) -> bytes:
+        tcp = struct.pack("!HHIIHHHH", src_port, dst_port, 1, 0, (5 << 12) | flags, 1024, 0, 0)
+        ip = struct.pack("!BBHHHBBH4s4s", 0x45, 0, 40, 1, 0, 64, 6, 0, src, dst)
+        return b"\xaa" * 12 + b"\x08\x00" + ip + tcp
+
+    a, b = b"\x0a\x00\x00\x01", b"\x0a\x00\x00\x02"
+    ts = 1_000_000.0
+    # 建立两条会话
+    processor.process(RawPacket(ts, tcp_frame(a, b, 40001, 80, 0x02), 54, 54))
+    processor.process(RawPacket(ts, tcp_frame(a, b, 40002, 81, 0x02), 54, 54))
+    assert len(processor.sessions.sessions) == 2
+    # 第一条会话 FIN 关闭
+    processor.process(RawPacket(ts + 1, tcp_frame(a, b, 40001, 80, 0x01), 54, 54))
+    # 第二条会话必须仍然存活（不能用墙钟判定超时）
+    remaining = list(processor.sessions.sessions.keys())
+    assert (str(__import__("ipaddress").IPv4Address(a)), 40002,
+            str(__import__("ipaddress").IPv4Address(b)), 81) in remaining

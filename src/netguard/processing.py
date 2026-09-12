@@ -83,7 +83,9 @@ class PacketProcessor:
         alerts.extend(self._run_detectors(packet))
         event = PacketEvent(packet, tuple(alerts))
         if session and session.closed:
-            self.sessions.cleanup(self._clock())
+            # 必须与 tracker 内部用同一时间轴：离线回放时包时间戳远早于墙钟，
+            # 用 self._clock() 会把所有存活会话误判为超时并全部删除
+            self.sessions.cleanup(packet.timestamp if packet.timestamp is not None else self._clock())
         return event
 
     def _run_detectors(self, packet: PacketInfo) -> list[Alert]:

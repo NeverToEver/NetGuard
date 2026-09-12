@@ -43,7 +43,8 @@ def subnet_from_device(ip: str, netmask: str) -> SubnetInfo | None:
     net = iface.network
     total_hosts = max(0, net.num_addresses - (2 if net.version == 4 and net.num_addresses > 2 else 0))
     broadcast = str(net.broadcast_address)
-    gateway_hint = str(next(net.hosts(), net.network_address))
+    # /32 前缀时 hosts() 返回 list 而非迭代器，需 iter() 兼容，否则 next() 抛 TypeError
+    gateway_hint = str(next(iter(net.hosts()), net.network_address))
     is_lab = 2 < total_hosts <= 254
     return SubnetInfo(
         cidr=f"{net.network_address}/{net.prefixlen}",

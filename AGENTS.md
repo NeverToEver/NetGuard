@@ -29,7 +29,7 @@ src/netguard/
   rules/engine.py           Snort-like IDS rule engine (single-packet + stream matching)
   rules/suggestions.py      rule suggestions from observed traffic
   detection/base.py         Detector protocol + BaseDetector
-  detection/detectors.py    SynFlood / PortScan / DnsTunnel detectors
+  detection/detectors.py    SynFlood / PortScan / DnsTunnel / IcmpFlood / BruteForce detectors
   session/tracker.py        TCP stream reassembly and flow cleanup
   statistics/traffic_stats.py  rolling-window counters / rates
   discovery/subnet.py       subnet sweep + host resolution

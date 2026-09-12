@@ -251,7 +251,7 @@ class ThemeManager:
         style.configure("Accent.TButton", background=colors["accent"], foreground=colors["accent_text"],
                         bordercolor=colors["accent"], padding=(10, 5))
         style.map("Accent.TButton", background=[("pressed", colors["accent_active"]), ("active", colors["accent_active"])])
-        style.configure("Danger.TButton", background=colors["danger"], foreground="#ffffff",
+        style.configure("Danger.TButton", background=colors["danger"], foreground=colors["accent_text"],
                         bordercolor=colors["danger"], padding=(10, 5))
         style.map("Danger.TButton", background=[("pressed", colors["danger_active"]), ("active", colors["danger_active"])])
         style.configure("TCheckbutton", background=colors["bg"], foreground=colors["text"])

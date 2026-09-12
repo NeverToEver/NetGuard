@@ -119,12 +119,18 @@ def write_pcap(path: str | Path, packets: Iterable[RawPacket], *, nanosecond: bo
         handle.write(magic)
         handle.write(struct.pack("<HHiIII", 2, 4, 0, 0, _SNAPLEN, _LINKTYPE_ETHERNET))
         for packet in packets:
-            ts_sec = int(packet.timestamp)
-            ts_frac = int(round((packet.timestamp - ts_sec) * divisor))
+            # 负时间戳无法写入无符号字段；记录头声明的长度不能超过实际载荷，
+            # 否则写出的文件自己读不回来（"pcap 包数据被截断"）
+            ts_sec = max(0, int(packet.timestamp))
+            ts_frac = int(round((packet.timestamp - int(packet.timestamp)) * divisor))
             if ts_frac >= divisor:
                 ts_sec += ts_frac // divisor
                 ts_frac %= divisor
-            handle.write(struct.pack("<IIII", ts_sec, ts_frac, packet.captured_length, packet.original_length))
+            elif ts_frac < 0:
+                ts_frac = 0
+            caplen = min(packet.captured_length, len(packet.data))
+            original = max(packet.original_length, caplen)
+            handle.write(struct.pack("<IIII", ts_sec, ts_frac, caplen, original))
             handle.write(packet.data)
             count += 1
     return count

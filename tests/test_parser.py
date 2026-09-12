@@ -266,3 +266,56 @@ def test_session_key_returns_tuple_for_tcp() -> None:
     pkt = PacketInfo(timestamp=0, length=10, raw=b"", protocol="TCP",
                      src="1.2.3.4", dst="5.6.7.8", src_port=80, dst_port=443)
     assert pkt.session_key == ("1.2.3.4", 80, "5.6.7.8", 443)
+
+
+# --- 非标准端口协议识别 ---
+
+def _tcp_raw(src_port: int, dst_port: int, payload: bytes) -> bytes:
+    tcp = struct.pack("!HHIIHHHH", src_port, dst_port, 1, 0, (5 << 12) | 0x18, 1024, 0, 0) + payload
+    ip_total = 20 + len(tcp)
+    ip = struct.pack("!BBHHHBBH4s4s", 0x45, 0, ip_total, 1, 0, 64, 6, 0,
+                     b"\x0a\x00\x00\x01", b"\x0a\x00\x00\x02")
+    return b"\xaa" * 12 + b"\x08\x00" + ip + tcp
+
+
+def _udp_raw(src_port: int, dst_port: int, payload: bytes) -> bytes:
+    udp = struct.pack("!HHHH", src_port, dst_port, 8 + len(payload), 0) + payload
+    ip_total = 20 + len(udp)
+    ip = struct.pack("!BBHHHBBH4s4s", 0x45, 0, ip_total, 1, 0, 64, 17, 0,
+                     b"\x0a\x00\x00\x01", b"\x0a\x00\x00\x02")
+    return b"\xaa" * 12 + b"\x08\x00" + ip + udp
+
+
+def test_http_detected_on_non_standard_port() -> None:
+    payload = b"GET /index.html HTTP/1.1\r\nHost: example.com\r\n\r\n"
+    info = parse_packet(_tcp_raw(50000, 8888, payload), timestamp=1.0)
+    assert info.protocol == "HTTP"
+    assert info.http["method"] == "GET"
+    assert info.http["headers"]["host"] == "example.com"
+
+
+def test_http_response_detected_on_non_standard_port() -> None:
+    payload = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+    info = parse_packet(_tcp_raw(8888, 50000, payload), timestamp=1.0)
+    assert info.protocol == "HTTP"
+    assert info.http["type"] == "response"
+
+
+def test_random_binary_payload_stays_tcp() -> None:
+    info = parse_packet(_tcp_raw(50000, 8888, bytes(range(64))), timestamp=1.0)
+    assert info.protocol == "TCP"
+    assert not info.http
+
+
+def test_dns_detected_on_non_standard_port() -> None:
+    name = b"\x03www\x07example\x03com\x00"
+    payload = struct.pack("!HHHHHH", 1, 0x0100, 1, 0, 0, 0) + name + struct.pack("!HH", 1, 1)
+    info = parse_packet(_udp_raw(53000, 5353, payload), timestamp=1.0)
+    assert info.protocol == "DNS"
+    assert info.dns["queries"][0]["name"] == "www.example.com"
+
+
+def test_random_udp_payload_stays_udp() -> None:
+    info = parse_packet(_udp_raw(53000, 5353, bytes(range(32))), timestamp=1.0)
+    assert info.protocol == "UDP"
+    assert not info.dns

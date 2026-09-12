@@ -80,7 +80,8 @@ class AppConfig:
                 sort_column=str(window_raw.get("sort_column", "") or ""),
                 sort_descending=bool(window_raw.get("sort_descending", False)),
                 last_device=str(window_raw.get("last_device", "") or ""),
-                bpf=str(window_raw.get("bpf", "tcp or udp") or "tcp or udp"),
+                # 空 BPF 是合法值（抓全部流量），不能用 `or` 回退默认值吞掉
+                bpf=str(window_raw.get("bpf", "tcp or udp")),
                 display_filter=str(window_raw.get("display_filter", "") or ""),
             )
 
