@@ -137,7 +137,8 @@ def apply_menu(menu: tk.Menu, colors: dict[str, str]) -> None:
         last = menu.index("end")
     except tk.TclError:
         return
-    if not last:
+    # index("end") 对空菜单返回 None，对单条目菜单返回 0，不能用电真值判断
+    if last is None:
         return
     for index in range(last + 1):
         try:

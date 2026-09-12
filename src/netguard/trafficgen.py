@@ -24,10 +24,39 @@ def _eth(payload: bytes) -> bytes:
     return b"\xaa\xbb\xcc\xdd\xee\xff" + b"\x11\x22\x33\x44\x55\x66" + struct.pack("!H", 0x0800) + payload
 
 
+def _checksum(data: bytes) -> int:
+    if len(data) % 2:
+        data += b"\x00"
+    total = sum(struct.unpack("!%dH" % (len(data) // 2), data))
+    total = (total >> 16) + (total & 0xFFFF)
+    total += total >> 16
+    return (~total) & 0xFFFF
+
+
+def _patch_l4_checksum(packet: bytes, proto: int) -> bytes:
+    """按 IPv4 伪首部补算 TCP/UDP 校验和；ICMP 直接对整条消息计算。"""
+    if not packet or len(packet) < 22:
+        return packet
+    segment = packet[20:]
+    if proto == 1:
+        checksum = _checksum(segment)
+        return packet[:22] + struct.pack("!H", checksum) + packet[24:]
+    if proto not in (6, 17):
+        return packet
+    pseudo = packet[12:20] + b"\x00" + bytes([proto]) + struct.pack("!H", len(segment))
+    checksum = _checksum(pseudo + segment)
+    if proto == 17 and checksum == 0:
+        checksum = 0xFFFF  # UDP 校验和算出 0 时按规范发送 0xFFFF
+    pos = 20 + (16 if proto == 6 else 6)
+    return packet[:pos] + struct.pack("!H", checksum) + packet[pos + 2 :]
+
+
 def _ipv4(payload: bytes, proto: int = 6, total_len_override: int | None = None) -> bytes:
     total = total_len_override if total_len_override is not None else 20 + len(payload)
-    return struct.pack("!BBHHHBBH4s4s", 0x45, 0, total, 1, 0, 64, proto, 0,
-                       b"\x0a\x00\x00\x01", b"\x0a\x00\x00\x02") + payload
+    header = struct.pack("!BBHHHBBH4s4s", 0x45, 0, total, 1, 0, 64, proto, 0,
+                         b"\x0a\x00\x00\x01", b"\x0a\x00\x00\x02")
+    header = header[:10] + struct.pack("!H", _checksum(header)) + header[12:]
+    return _patch_l4_checksum(header + payload, proto)
 
 
 def _tcp(payload: bytes, src_port: int = 12345, dst_port: int = 80,
@@ -103,8 +132,8 @@ TEMPLATES: list[PacketTemplate] = [
 
     # --- Abnormal packets ---
     PacketTemplate("abn-eth", "截断 Ethernet", "ETHERNET", "abnormal",
-                   "Ethernet 帧头部不完整",
-                   lambda: b"\xaa\xbb\xcc\xdd"[:6]),
+                   "Ethernet 帧头部不完整（仅前 6 字节目的 MAC）",
+                   lambda: _eth(b"")[:6]),
     PacketTemplate("abn-ip-hdr", "截断 IPv4 头", "IP", "abnormal",
                    "IPv4 头部被截断，缺少必要字段",
                    lambda: _eth(struct.pack("!BB", 0x45, 0))),

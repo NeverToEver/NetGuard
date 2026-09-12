@@ -260,6 +260,8 @@ class NetGuardApp(tk.Tk):
         self._last_error_state: tuple[int, int, int, str] | None = None
         self._filter_after_id: str | None = None
         self._refilter_after_id: str | None = None
+        self._refilter_queue: list[int] = []
+        self._refilter_cursor = 0
         self._sort_column = ""
         self._sort_descending = False
         self._busy_count = 0

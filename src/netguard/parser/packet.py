@@ -245,17 +245,16 @@ def _parse_icmp(info: PacketInfo, data: bytes) -> PacketInfo:
 
 
 def _parse_http(info: PacketInfo, payload: bytes) -> None:
-    try:
-        text = payload.decode("iso-8859-1", errors="replace")
-    except Exception as exc:
-        info.issues.append(ParseIssue("http", f"解码失败：{exc}"))
-        return
+    # iso-8859-1 对全部 256 个字节值都有映射，decode 不会失败
+    text = payload.decode("iso-8859-1")
     header = text.split("\r\n\r\n", 1)[0]
     lines = header.split("\r\n")
     first = lines[0] if lines else ""
     if not first:
         return
-    http: dict[str, Any] = {"first_line": first, "headers": {}}
+    # 首行可能被攻击者构造得极长，仅展示前 512 字符，避免 summary/详情放大内存
+    display_first = first[:512]
+    http: dict[str, Any] = {"first_line": display_first, "headers": {}}
     parts = first.split()
     if len(parts) >= 3 and parts[0].startswith("HTTP/"):
         http.update({"type": "response", "version": parts[0], "status": parts[1]})
@@ -267,10 +266,10 @@ def _parse_http(info: PacketInfo, payload: bytes) -> None:
     for line in lines[1:]:
         if ":" in line:
             key, value = line.split(":", 1)
-            http["headers"][key.strip().lower()] = value.strip()
+            http["headers"][key.strip().lower()] = value.strip()[:512]
     info.http = http
     info.protocol = "HTTP"
-    info.summary = first
+    info.summary = display_first
 
 
 def _parse_dns(info: PacketInfo, payload: bytes) -> None:
@@ -306,15 +305,12 @@ def _read_dns_name(payload: bytes, offset: int, depth: int = 0) -> tuple[str, in
     if depth > 10:
         return "", offset, "DNS 压缩指针循环"
     labels: list[str] = []
-    original_offset = offset
-    jumped = False
     while True:
         if offset >= len(payload):
             return ".".join(labels), offset, "DNS 名称被截断"
         length = payload[offset]
         if length == 0:
-            offset += 1
-            return ".".join(labels), (original_offset + 2 if jumped else offset), None
+            return ".".join(labels), offset + 1, None
         if length & 0xC0 == 0xC0:
             if offset + 1 >= len(payload):
                 return ".".join(labels), offset, "DNS 压缩指针被截断"

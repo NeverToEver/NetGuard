@@ -73,3 +73,59 @@ def test_resolve_theme_mode_variants() -> None:
     assert resolve_theme_mode(False) == "light"
     assert resolve_theme_mode("garbage") == "system"
     assert resolve_theme_mode(None) == "system"
+
+
+def test_bpf_null_falls_back_to_empty(tmp_path) -> None:
+    path = tmp_path / "cfg.json"
+    path.write_text(json.dumps({"window": {"bpf": None}}), encoding="utf-8")
+    assert AppConfig.load(path).window.bpf == ""
+
+
+def test_loads_utf8_bom_file(tmp_path) -> None:
+    path = tmp_path / "cfg.json"
+    path.write_text(json.dumps({"theme_mode": "dark"}), encoding="utf-8-sig")
+    assert AppConfig.load(path).theme_mode == "dark"
+
+
+def test_string_bools_are_parsed(tmp_path) -> None:
+    path = tmp_path / "cfg.json"
+    path.write_text(
+        json.dumps({"window": {"zoomed": "false", "sort_descending": "1"}}),
+        encoding="utf-8",
+    )
+    window = AppConfig.load(path).window
+    assert window.zoomed is False
+    assert window.sort_descending is True
+
+
+def test_theme_mode_normalized_and_legacy_fallback(tmp_path) -> None:
+    path = tmp_path / "cfg.json"
+    path.write_text(json.dumps({"theme_mode": "Dark"}), encoding="utf-8")
+    assert AppConfig.load(path).theme_mode == "dark"
+
+    path.write_text(json.dumps({"theme_mode": 1, "dark_mode": True}), encoding="utf-8")
+    assert AppConfig.load(path).theme_mode == "dark"
+
+    # 显式 system 不应被 legacy dark_mode 覆盖
+    path.write_text(json.dumps({"theme_mode": "system", "dark_mode": True}), encoding="utf-8")
+    assert AppConfig.load(path).theme_mode == "system"
+
+
+def test_unknown_fields_survive_roundtrip(tmp_path) -> None:
+    path = tmp_path / "cfg.json"
+    path.write_text(
+        json.dumps({"theme_mode": "dark", "window": {}, "future_field": {"a": 1}}),
+        encoding="utf-8",
+    )
+    AppConfig.load(path).save()
+    assert json.loads(path.read_text(encoding="utf-8"))["future_field"] == {"a": 1}
+
+
+def test_save_leaves_no_temp_file(tmp_path) -> None:
+    path = tmp_path / "cfg.json"
+    config = AppConfig.load(path)
+    config.theme_mode = "light"
+    config.save()
+    config.save()
+    assert path.exists()
+    assert not (tmp_path / "cfg.json.tmp").exists()

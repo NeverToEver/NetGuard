@@ -319,3 +319,17 @@ def test_random_udp_payload_stays_udp() -> None:
     info = parse_packet(_udp_raw(53000, 5353, bytes(range(32))), timestamp=1.0)
     assert info.protocol == "UDP"
     assert not info.dns
+
+
+def test_http_first_line_is_truncated() -> None:
+    huge = b"GET /" + b"A" * 60_000 + b" HTTP/1.1\r\nHost: example.com\r\n\r\n"
+    info = parse_packet(ethernet(ipv4(tcp(huge, dst_port=80))))
+    assert len(info.summary) <= 512
+    assert info.http["first_line"] == info.summary
+    assert info.summary.startswith("GET /AAA")
+
+
+def test_http_header_value_truncated() -> None:
+    payload = b"GET / HTTP/1.1\r\nX-Long: " + b"B" * 5000 + b"\r\n\r\n"
+    info = parse_packet(ethernet(ipv4(tcp(payload, dst_port=80))))
+    assert len(info.http["headers"]["x-long"]) <= 512
