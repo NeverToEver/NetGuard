@@ -180,23 +180,6 @@ class ThemeManager:
     def theme_use(self, theme_name: str) -> None:
         self._style.theme_use(theme_name)
 
-    def apply_dialog(
-        self,
-        window: tk.Toplevel,
-        classic_widgets: list[tk.Widget],
-        dark: bool,
-    ) -> None:
-        """为对话框统一应用主题：背景 + 经典控件（Text/Listbox）配色。
-
-        ttk 样式是全局的，主窗口已配置；此处只需处理对话框自身的 tk 控件，
-        避免各对话框各复制一套配色逻辑、切主题时出现"花脸"。
-        """
-        colors = build_colors(dark)
-        window.configure(bg=colors["bg"])
-        for widget in classic_widgets:
-            if widget.winfo_exists():
-                self._style_classic(widget, colors)
-
     def _style_classic(self, widget: tk.Widget, colors: dict[str, str]) -> None:
         supported = set(widget.keys())
         is_text = isinstance(widget, tk.Text)
