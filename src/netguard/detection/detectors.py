@@ -35,14 +35,28 @@ def _is_tcp_syn(packet: PacketInfo) -> bool:
     return "SYN" in flags and "ACK" not in flags
 
 
-def _suffix(name: str) -> str:
-    """取域名后缀用于聚合查询频率，保留最多三级标签。
+def _validate_threshold(threshold: int, max_samples: int) -> None:
+    """窗口硬截断发生在阈值判断之前，阈值超过窗口容量会导致检测器永久失聪。"""
+    if threshold > max_samples:
+        raise ValueError(
+            f"threshold ({threshold}) 不能大于 max_samples ({max_samples})："
+            "窗口截断后样本数永远达不到阈值，检测器将无法告警"
+        )
 
-    隧道流量通常把数据编码在子域中，按较长的后缀（而非仅末两级）聚合，
-    才能把 ``host1.tunnel.example.com`` 与 ``host2.tunnel.example.com`` 归为一组。
+
+def _suffix(name: str) -> str:
+    """取域名后缀用于聚合查询频率。
+
+    4 级及以上标签保留末三级（``host1.tunnel.example.com`` 归入
+    ``tunnel.example.com``）；恰为 3 级时取末两级——``<数据>.example.com``
+    把数据编码在二级子域，是隧道最常见形态，按全名聚合永远凑不满频率阈值。
     """
     labels = name.split(".")
-    return ".".join(labels[-3:]) if len(labels) >= 3 else name
+    if len(labels) < 3:
+        return name
+    if len(labels) == 3:
+        return ".".join(labels[-2:])
+    return ".".join(labels[-3:])
 
 
 class SynFloodDetector(BaseDetector):
@@ -63,6 +77,7 @@ class SynFloodDetector(BaseDetector):
         super().__init__(clock)
         self.window_seconds = window_seconds
         self.threshold = threshold
+        _validate_threshold(threshold, max_samples)
         self.max_keys = max_keys
         self.max_samples = max_samples
         self._events: dict[tuple[str, int | None], deque[float]] = defaultdict(deque)
@@ -129,6 +144,7 @@ class PortScanDetector(BaseDetector):
         super().__init__(clock)
         self.window_seconds = window_seconds
         self.threshold = threshold
+        _validate_threshold(threshold, max_samples)
         self.max_keys = max_keys
         self.max_samples = max_samples
         self._ports: dict[str, deque[tuple[float, int | None]]] = defaultdict(deque)
@@ -197,6 +213,7 @@ class IcmpFloodDetector(BaseDetector):
         super().__init__(clock)
         self.window_seconds = window_seconds
         self.threshold = threshold
+        _validate_threshold(threshold, max_samples)
         self.max_keys = max_keys
         self.max_samples = max_samples
         self._events: dict[tuple[str, str], deque[float]] = defaultdict(deque)
@@ -266,6 +283,7 @@ class BruteForceDetector(BaseDetector):
         super().__init__(clock)
         self.window_seconds = window_seconds
         self.threshold = threshold
+        _validate_threshold(threshold, max_samples)
         self.service_ports = frozenset(service_ports)
         self.max_keys = max_keys
         self.max_samples = max_samples
@@ -334,6 +352,7 @@ class DnsTunnelDetector(BaseDetector):
         self.max_label_length = max_label_length
         self.window_seconds = window_seconds
         self.rate_threshold = rate_threshold
+        _validate_threshold(rate_threshold, max_samples)
         self.max_keys = max_keys
         self.max_samples = max_samples
         self._suffix_events: dict[str, deque[float]] = defaultdict(deque)
@@ -351,22 +370,25 @@ class DnsTunnelDetector(BaseDetector):
                 continue
             longest = max((len(label) for label in name.split(".")), default=0)
             if len(name) > self.max_name_length or longest > self.max_label_length:
+                # 超长域名按来源 IP 做时间窗抑制：隧道会持续发送超长查询，
+                # 不抑制会对每个查询各告警一次，直接刷满事件表
+                key = f"\x00long:{packet.src}"
+                self._append_event(key, now)
+                last = self._alerted.get(key)
+                if last is not None and now - last < self.window_seconds:
+                    continue
+                self._alerted[key] = now
                 alerts.append(
                     self._alert(
                         packet,
-                        f"疑似 DNS 隧道：超长域名查询 {name[:80]}（长度 {len(name)}，最长标签 {longest}）",
+                        f"疑似 DNS 隧道：{packet.src} 查询超长域名 {name[:80]}"
+                        f"（长度 {len(name)}，最长标签 {longest}）",
                     )
                 )
                 continue
             suffix = _suffix(name)
+            self._append_event(suffix, now)
             window = self._suffix_events[suffix]
-            window.append(now)
-            cutoff = now - self.window_seconds
-            while window and window[0] < cutoff:
-                window.popleft()
-            while len(window) > self.max_samples:
-                window.popleft()
-            self._evict_if_needed()
             if len(window) < self.rate_threshold:
                 continue
             last = self._alerted.get(suffix)
@@ -380,6 +402,16 @@ class DnsTunnelDetector(BaseDetector):
                 )
             )
         return alerts
+
+    def _append_event(self, key: str, now: float) -> None:
+        window = self._suffix_events[key]
+        window.append(now)
+        cutoff = now - self.window_seconds
+        while window and window[0] < cutoff:
+            window.popleft()
+        while len(window) > self.max_samples:
+            window.popleft()
+        self._evict_if_needed()
 
     def _evict_if_needed(self) -> None:
         _evict_oldest(self._suffix_events, self.max_keys, self._alerted)

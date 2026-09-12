@@ -227,7 +227,10 @@ def _payload_keywords(payload: bytes) -> list[str]:
 
 
 def _clean_option_text(value: str, max_length: int) -> str:
-    cleaned = "".join(ch for ch in value.replace('"', "'").replace(";", ",") if ch >= " ")
+    # 反斜杠必须清除：content 值尾部残留 "\" 会转义闭引号，吞掉后续选项区
+    cleaned = "".join(
+        ch for ch in value.replace("\\", "").replace('"', "'").replace(";", ",") if ch >= " "
+    )
     return cleaned[:max_length]
 
 

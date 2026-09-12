@@ -176,7 +176,7 @@ def test_detectors_reset_clears_state() -> None:
 
 def test_port_scan_window_is_bounded_under_high_volume() -> None:
     clock = FakeClock()
-    detector = PortScanDetector(clock, window_seconds=10.0, threshold=1000, max_samples=100)
+    detector = PortScanDetector(clock, window_seconds=10.0, threshold=50, max_samples=100)
 
     # 时间戳不前进时，窗口不应无限增长（否则 distinct 统计退化为 O(n²)）
     for _ in range(1000):
