@@ -50,7 +50,9 @@ class PacketPipeline:
         self.event_queue: queue.Queue[PacketEvent] = queue.Queue(maxsize=max_queue)
         self.on_packet: Callable[[PacketEvent], None] | None = None
         self._threads: list[threading.Thread] = []
-        self._stop = threading.Event()
+        # 每轮 start 使用独立的 stop 事件：join 超时被放弃的旧线程持有旧事件，
+        # 不会被下一轮 start 误唤醒复活
+        self._parse_stop = threading.Event()
         self._dropped_events = 0
         self._dropped_lock = threading.Lock()
         self._max_dropped = 2_147_483_647
@@ -118,7 +120,7 @@ class PacketPipeline:
     def start(self, device: str, bpf_filter: str = "") -> None:
         self.stop()
         self.reset_state()
-        self._stop.clear()
+        self._parse_stop = threading.Event()
         self.source.start(device, bpf_filter)
         self._start_parse_thread()
 
@@ -126,7 +128,7 @@ class PacketPipeline:
         """离线回放 pcap 文件（无需 libpcap 或管理员权限）。"""
         self.stop()
         self.reset_state()
-        self._stop.clear()
+        self._parse_stop = threading.Event()
         self.source.start_file(path)
         self._start_parse_thread()
 
@@ -136,7 +138,7 @@ class PacketPipeline:
         parse_thread.start()
 
     def stop(self) -> None:
-        self._stop.set()
+        self._parse_stop.set()
         self.source.stop()
         for thread in self._threads:
             if thread.is_alive():
@@ -144,6 +146,9 @@ class PacketPipeline:
                 if thread.is_alive():
                     logger.warning("线程 %s 未在超时内结束，强制放弃", thread.name)
         self._threads = []
+        # 解析线程停止后队列里可能还有已解析未泵出的事件，先经 on_packet
+        # 派发完再清空，避免尾部事件（含告警）静默丢失
+        self.pump_remaining()
         self._drain_queues()
 
     def reset_state(self) -> None:
@@ -189,17 +194,50 @@ class PacketPipeline:
     def drain_and_wait(self, timeout: float = 5.0) -> list[PacketEvent]:
         """回放结束后：等待解析线程清空队列，返回剩余全部事件。
 
-        仅用于离线回放等有明确结束点的场景。
+        仅用于离线回放等有明确结束点的场景。一直等到回放完成、回放出错
+        或队列排空，不再按固定总时长截断（旧实现会让大文件回放被静默
+        截断）；``timeout`` 现在表示"无进展看门狗"——连续这么久收集数与
+        两个队列长度都没有任何变化才提前返回，防止解析线程意外死亡后
+        调用方永久阻塞。
         """
-        deadline = time.monotonic() + timeout
+        watchdog_interval = max(timeout, 5.0)
+        watchdog = time.monotonic() + watchdog_interval
         collected: list[PacketEvent] = []
-        while time.monotonic() < deadline:
+        last_progress: tuple[int, int, int] | None = None
+        while True:
             collected.extend(self.pump(1000))
-            if self.replay_finished and self.source.raw_queue.empty() and self.event_queue.empty():
+            if (
+                self.replay_finished
+                and self.source.raw_queue.empty()
+                and self.event_queue.empty()
+            ):
+                break
+            if self.source.capture_error:
+                break
+            progress = (
+                len(collected),
+                self.source.raw_queue.qsize(),
+                self.event_queue.qsize(),
+            )
+            if progress != last_progress:
+                last_progress = progress
+                watchdog = time.monotonic() + watchdog_interval
+            elif time.monotonic() > watchdog:
+                logger.warning("回放 %.0f 秒无进展，提前结束排空等待", watchdog_interval)
                 break
             time.sleep(0.01)
         collected.extend(self.pump(1000))
         return collected
+
+    def pump_remaining(self, batch: int = 1000) -> int:
+        """把 event_queue 里剩余事件全部经 pump/on_packet 派发，返回派发条数。"""
+        total = 0
+        while True:
+            events = self.pump(batch)
+            total += len(events)
+            if len(events) < batch:
+                break
+        return total
 
     def status(self) -> PipelineStatus:
         snap = self.processor.snapshot()
@@ -219,13 +257,23 @@ class PacketPipeline:
     # --- 处理线程 -------------------------------------------------------------
 
     def _parse_worker(self) -> None:
+        stop_event = self._parse_stop
         # stop 后仍要把队列里已捕获的包解析完，避免停止时静默丢失尾部数据
-        while not self._stop.is_set() or not self.source.raw_queue.empty():
+        while not stop_event.is_set() or not self.source.raw_queue.empty():
+            if threading.current_thread() not in self._threads:
+                # 被 join 超时放弃的旧代线程：立即退出，防止与新代线程
+                # 并发访问无锁的 processor 状态
+                return
             try:
                 raw = self.source.raw_queue.get(timeout=0.1)
             except queue.Empty:
                 continue
-            event = self.processor.process(raw)
+            try:
+                event = self.processor.process(raw)
+            except Exception:
+                # 单包处理失败不能杀死解析线程，否则统计永久冻结且无任何状态提示
+                logger.exception("处理数据包失败，已跳过该包")
+                continue
             if event is None:
                 continue
             try:
