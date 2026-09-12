@@ -1,0 +1,14 @@
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.venv/
+.venv-win/
+.venv-build/
+venv/
+.DS_Store
+build/
+dist/
+output/
+tmp/
+~$*.docx
+*.egg-info/
