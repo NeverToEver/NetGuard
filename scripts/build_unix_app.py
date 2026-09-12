@@ -33,12 +33,24 @@ def main() -> None:
     env_path = Path(args.python_env).expanduser().resolve()
     _validate_env(env_path)
 
+    import platform as _platform
+
+    if _platform.system() != "Darwin":
+        raise SystemExit("此脚本用于构建 macOS .app / Unix 便携包，当前平台不是 macOS。")
+
     with _staged_env_if_needed(env_path) as build_env:
         DIST.mkdir(parents=True, exist_ok=True)
         BUILD.mkdir(parents=True, exist_ok=True)
         _ensure_icons()
         _build_portable_dir(build_env)
-        _build_app_bundle(build_env)
+        try:
+            _build_app_bundle(build_env)
+        except BaseException:
+            # 构建中途失败必须回收半成品 bundle，否则 dist 里留下
+            # "便携目录 OK、.app 半残" 的混态且无任何提示
+            if APP_BUNDLE.exists():
+                shutil.rmtree(APP_BUNDLE, ignore_errors=True)
+            raise
 
     print(f"已打包 Python 运行环境：{env_path}")
     print(f"已生成便携 Unix 应用目录：{PORTABLE_DIR}")
@@ -134,8 +146,11 @@ exec "$BASE_DIR/python-env/bin/python" "$BASE_DIR/app/main.py" "$@"
     )
 
     legacy = DIST / APP_NAME
-    if legacy.exists() or legacy.is_symlink():
+    if legacy.is_symlink() or (legacy.exists() and legacy.is_file()):
         legacy.unlink()
+    elif legacy.is_dir():
+        # 历史版本产物可能是目录，Path.unlink 会抛 IsADirectoryError
+        shutil.rmtree(legacy)
     _write_launcher(
         legacy,
         f"""#!/bin/sh
@@ -452,7 +467,8 @@ def _ignore_env_noise(_: str, names: list[str]) -> set[str]:
 
 
 def _write_launcher(path: Path, content: str) -> None:
-    path.write_text(content, encoding="utf-8")
+    # 固定 LF：Windows 宿主上文本模式默认换行翻译会写出 CRLF，Unix 下报 bad interpreter
+    path.write_text(content, encoding="utf-8", newline="\n")
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 

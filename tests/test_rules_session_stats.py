@@ -526,3 +526,46 @@ def test_session_cleanup_after_fin_uses_packet_timestamp() -> None:
     remaining = list(processor.sessions.sessions.keys())
     assert (str(__import__("ipaddress").IPv4Address(a)), 40002,
             str(__import__("ipaddress").IPv4Address(b)), 81) in remaining
+
+
+# --- 阶段6 回归：碎片字节预算 / 批量淘汰 / stats 有界窗口 ---
+
+
+def _tcp(seq: int, payload: bytes, timestamp: float = 1.0):
+    return tcp_packet(seq=seq, payload=payload, timestamp=timestamp)
+
+
+def test_session_fragment_byte_budget_evicts_session() -> None:
+    """碎片只限条数不限字节时，恶意乱序注入可把每会话内存撑到 200×snaplen。"""
+    tracker = SessionTracker(max_fragment_bytes=500)
+    big = b"x" * 800
+    tracker.update(_tcp(10, big))
+    session = tracker.sessions.get(("10.0.0.1", 12345, "10.0.0.2", 80))
+    assert session is not None
+    tracker.update(_tcp(10 + 2000, big))  # 乱序远端片段，字节超预算
+    # 碎片字节超预算后会话被整体逐出
+    assert tracker.sessions.get(("10.0.0.1", 12345, "10.0.0.2", 80)) is None
+
+
+def test_session_max_sessions_batch_eviction() -> None:
+    tracker = SessionTracker(max_sessions=10)
+    for i in range(50):
+        packet = tcp_packet(seq=1, payload=b"", src=f"10.0.1.{i % 200 + 1}", src_port=40000 + i)
+        tracker.update(packet)
+    assert len(tracker.sessions) <= 10 + 1  # 批量逐出留出余量，但不无界增长
+    assert len(tracker.sessions) <= tracker.max_sessions
+
+
+def test_traffic_stats_recent_window_is_bounded(monkeypatch) -> None:
+    from netguard.statistics import TrafficStats
+
+    stats = TrafficStats(rate_window_seconds=60.0)
+    monkeypatch.setattr(TrafficStats, "MAX_SAMPLES", 100)
+    packet = tcp_packet(seq=1, payload=b"", timestamp=1.0)
+    for _ in range(500):
+        stats.update(packet)
+    assert len(stats._recent) <= 100
+    snap = stats.snapshot()
+    assert snap.packets_per_second > 0
+    assert snap.bytes_per_second > 0
+    assert stats.total_packets == 500

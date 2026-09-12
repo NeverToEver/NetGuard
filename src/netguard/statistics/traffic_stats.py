@@ -19,6 +19,11 @@ class TrafficSnapshot:
 
 
 class TrafficStats:
+    #: 速率窗口内的样本条数上限：高速率下窗口只按时间裁剪会驻留数十万元组，
+    #: 且 snapshot 在锁内做 O(n) 全窗口求和。有界化后速率按实际保留时间跨度
+    #: 计算，仍是无偏估计；达到上限时丢弃最旧样本（与检测器 max_samples 同思路）。
+    MAX_SAMPLES = 65_536
+
     def __init__(self, rate_window_seconds: float = 5.0, max_protocols: int = 64, clock: Clock = system_clock) -> None:
         self.rate_window_seconds = rate_window_seconds
         self.max_protocols = max_protocols
@@ -28,6 +33,7 @@ class TrafficStats:
         self.total_bytes = 0
         self.protocol_counts: Counter[str] = Counter()
         self._recent: deque[tuple[float, int]] = deque()
+        self._recent_bytes = 0
         self.active_sessions = 0
 
     def update(self, packet: PacketInfo, active_sessions: int = 0) -> None:
@@ -40,7 +46,12 @@ class TrafficStats:
                 self.protocol_counts = Counter(dict(self.protocol_counts.most_common(self.max_protocols)))
             self.active_sessions = active_sessions
             self._recent.append((now, packet.length))
+            self._recent_bytes += packet.length
             self._trim(now)
+            recent = self._recent
+            while len(recent) > self.MAX_SAMPLES:
+                _, size = recent.popleft()
+                self._recent_bytes -= size
 
     def snapshot(self) -> TrafficSnapshot:
         with self._lock:
@@ -72,7 +83,8 @@ class TrafficStats:
                 )
             elapsed = self._recent[-1][0] - self._recent[0][0] if len(self._recent) > 1 else 1.0
             elapsed = max(elapsed, 1.0)
-            recent_bytes = sum(size for _, size in self._recent)
+            # 字节数增量维护，不再锁内 O(n) 全窗口求和
+            recent_bytes = self._recent_bytes
             return TrafficSnapshot(
                 total_packets=self.total_packets,
                 total_bytes=self.total_bytes,
@@ -84,5 +96,7 @@ class TrafficStats:
 
     def _trim(self, now: float) -> None:
         cutoff = now - self.rate_window_seconds
-        while self._recent and self._recent[0][0] < cutoff:
-            self._recent.popleft()
+        recent = self._recent
+        while recent and recent[0][0] < cutoff:
+            _, size = recent.popleft()
+            self._recent_bytes -= size

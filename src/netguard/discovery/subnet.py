@@ -91,7 +91,13 @@ def ping_host(ip: str, timeout: float = 1.0) -> bool:
             capture_output=True,
             timeout=timeout + 2.0,
         )
-        return result.returncode == 0
+        if result.returncode != 0:
+            return False
+        # 退出码 0 不代表目标可达：Windows 收到网关的 "Destination host
+        # unreachable" 应答时返回码也是 0。真实回显应答带 TTL/time 特征，
+        # unreachable 应答没有，用特征区分而不只看退出码。
+        output = _decode_output(result.stdout).lower()
+        return "ttl=" in output or "time=" in output or "时间=" in output
     except (subprocess.TimeoutExpired, OSError):
         return False
 
@@ -213,17 +219,16 @@ def _split_ipconfig_sections(output: str) -> list[str]:
 
 def _windows_device_matches(section: str, device_name: str) -> bool:
     needle = _normalize_device_token(device_name)
-    if not needle:
+    if not needle or len(needle) < 3:
         return False
     section_name = _normalize_device_token(_windows_section_name(section))
     section_text = _normalize_device_token(section)
     guid_match = re.search(r"\{([^}]+)\}", device_name)
     if guid_match and _normalize_device_token(guid_match.group(1)) in section_text:
         return True
-    return bool(
-        (section_name and (needle in section_name or section_name in needle))
-        or needle in section_text
-    )
+    # 只做正向包含：反向包含（section_name in needle）会让 Windows 默认命名的
+    # "以太网 2" 匹配到 "以太网" 网卡，取错网段
+    return bool((section_name and needle in section_name) or needle in section_text)
 
 
 def _subnets_from_ipconfig_sections(sections: list[str]) -> list[SubnetInfo]:
@@ -241,15 +246,28 @@ def _subnets_from_ipconfig_sections(sections: list[str]) -> list[SubnetInfo]:
     return result
 
 
+_DNS_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=32, thread_name_prefix="netguard-dns")
+
+
+def _gethostbyaddr(ip: str) -> str:
+    name, _aliases, _addresses = socket.gethostbyaddr(ip)
+    return name
+
+
 def resolve_hostname(ip: str, timeout: float = 2.0) -> str | None:
+    """反向 DNS 解析，带真实超时。
+
+    socket.setdefaulttimeout 只影响新建 socket，对 gethostbyaddr（直接走
+    OS 解析器）无效——不可达主机在 Windows 上可能阻塞 10 秒量级。改为提交
+    到共享线程池并带超时回收：超时后放弃该次结果立即返回，解析线程由
+    OS 解析器决定何时退出（最终会退出，不阻塞调用方）。
+    """
+    future = _DNS_EXECUTOR.submit(_gethostbyaddr, ip)
     try:
-        old_timeout = socket.getdefaulttimeout()
-        socket.setdefaulttimeout(timeout)
-        try:
-            name, _aliases, _addresses = socket.gethostbyaddr(ip)
-            return name
-        finally:
-            socket.setdefaulttimeout(old_timeout)
+        return future.result(timeout=timeout)
+    except concurrent.futures.TimeoutError:
+        future.cancel()
+        return None
     except (socket.herror, socket.gaierror, socket.timeout, OSError):
         return None
 
@@ -310,23 +328,44 @@ def resolve_hosts(
     completed = 0
     _cancel = cancel_event or threading.Event()
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_map = {executor.submit(resolve_host, ip, timeout): ip for ip in ips}
-        for future in concurrent.futures.as_completed(future_map):
-            ip = future_map[future]
-            try:
-                info = future.result()
-                result[ip] = info
-            except Exception:
-                logger.info("resolve %s 失败", ip)
-                result[ip] = HostInfo(ip=ip)
-            completed += 1
-            if on_progress is not None:
+        # 增量提交 + 取消时撤销排队任务：一次性提交全部后只 break 的话，
+        # with 退出要等所有排队任务跑完（死主机最坏十几分钟）
+        pending_ips = iter(ips)
+        future_map: dict[concurrent.futures.Future[HostInfo], str] = {}
+
+        def submit_until_full() -> None:
+            while not _cancel.is_set() and len(future_map) < max_workers:
                 try:
-                    on_progress(completed, total, ip)
+                    ip = next(pending_ips)
+                except StopIteration:
+                    return
+                future_map[executor.submit(resolve_host, ip, timeout)] = ip
+
+        submit_until_full()
+        while future_map:
+            done, _pending = concurrent.futures.wait(
+                future_map,
+                return_when=concurrent.futures.FIRST_COMPLETED,
+            )
+            for future in done:
+                ip = future_map.pop(future)
+                try:
+                    info = future.result()
+                    result[ip] = info
                 except Exception:
-                    pass
+                    logger.info("resolve %s 失败", ip)
+                    result[ip] = HostInfo(ip=ip)
+                completed += 1
+                if on_progress is not None:
+                    try:
+                        on_progress(completed, total, ip)
+                    except Exception:
+                        pass
             if _cancel.is_set():
+                for future in future_map:
+                    future.cancel()
                 break
+            submit_until_full()
     return result
 
 
@@ -339,15 +378,25 @@ def detect_subnet_os_fallback(device_name: str, aliases: tuple[str, ...] = ()) -
 
 def _detect_unix_subnets(ifname: str) -> list[SubnetInfo]:
     result: list[SubnetInfo] = []
+    if ifname.startswith("-"):
+        # 防参数注入：接口名以 "-" 开头会被解析为命令选项
+        return result
+    proc: subprocess.CompletedProcess[bytes] | None = None
     try:
         proc = subprocess.run(["ifconfig", ifname], capture_output=True, timeout=5)
     except (subprocess.TimeoutExpired, OSError, FileNotFoundError):
+        proc = None
+    # ifconfig 存在但对指定接口返回非 0（接口名不匹配/BusyBox 差异）时
+    # 也要回退 ip addr，不能拿空输出直接返回
+    if proc is None or proc.returncode != 0:
         try:
             proc = subprocess.run(
                 ["ip", "addr", "show", ifname], capture_output=True, timeout=5
             )
         except (subprocess.TimeoutExpired, OSError, FileNotFoundError):
             return result
+    if proc.returncode != 0:
+        return result
     output = _decode_output(proc.stdout)
     for m in re.finditer(r'inet (\d+\.\d+\.\d+\.\d+).*?netmask (0x[0-9a-fA-F]+)', output):
         ip = m.group(1)

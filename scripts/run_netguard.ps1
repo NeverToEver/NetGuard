@@ -3,8 +3,9 @@
     NetGuard Windows 启动脚本（自动检测 Python 解释器）。
 
 .DESCRIPTION
-    优先使用项目内 .venv\Scripts\python.exe，其次环境变量 NETGUARD_PYTHON，
-    再回退到 py 启动器与 PATH 上的 python。要求 Python 3.11+。
+    优先使用环境变量 NETGUARD_PYTHON 指定的解释器，其次项目内
+    .venv\Scripts\python.exe，再回退到 py 启动器与 PATH 上的 python。
+    要求 Python 3.11+。
 
 .EXAMPLE
     .\scripts\run_netguard.ps1

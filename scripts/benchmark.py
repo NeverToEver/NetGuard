@@ -64,7 +64,10 @@ def _rss_bytes() -> int | None:
     try:
         import resource  # type: ignore
 
-        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+        # ru_maxrss 单位因平台而异：Linux 是 KB，macOS 是字节（getrusage(2)）。
+        # 注意它是进程峰值而非当前值，"处理前后差值" 只在峰值未抬高时有意义。
+        ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return ru * 1024 if sys.platform != "darwin" else ru
     except Exception:
         pass
     try:
@@ -246,6 +249,11 @@ def main() -> int:
     parser.add_argument("--rules", type=int, default=200, help="规则匹配基准加载的规则条数")
     parser.add_argument("--json", metavar="FILE", help="将结果写入 JSON 文件")
     parser.add_argument("--markdown", action="store_true", help="额外输出 Markdown 表格")
+    parser.add_argument(
+        "--fail-on-miss",
+        action="store_true",
+        help="检测场景未命中或误报率异常时返回非 0 退出码（用于 CI 回归门禁）",
+    )
     args = parser.parse_args()
 
     templates = _normal_templates()
@@ -345,6 +353,14 @@ def main() -> int:
         print(f"| 攻击场景检出 | {hits}/{len(detection)} |")
         print(f"| 正常流量误报率 | {fp['false_positive_rate'] * 100:.3f}% |")
 
+    if args.fail_on_miss:
+        missed = [d["scenario"] for d in detection if not d["detected"]]
+        if missed:
+            print(f"检测未命中：{', '.join(missed)}", file=sys.stderr)
+            return 1
+        if fp["false_positive_rate"] > 0.05:
+            print(f"误报率异常：{fp['false_positive_rate'] * 100:.3f}% > 5%", file=sys.stderr)
+            return 1
     return 0
 
 
