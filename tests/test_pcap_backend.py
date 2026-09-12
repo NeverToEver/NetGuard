@@ -225,3 +225,103 @@ class TestClose:
         backend = _backend()
         backend.close()
         backend.close()  # 未打开时重复关闭不应抛异常
+
+
+class TestKernelDropStats:
+    def test_kernel_drops_reported_via_hook(self):
+        """pcap_stats 采样的内核丢弃经 on_kernel_drop 上报。"""
+        lib = MagicMock(spec=list(PcapBackend._REQUIRED_SYMBOLS) + ["pcap_stats"])
+        lib.pcap_open_live.return_value = 1234
+        lib.pcap_geterr.return_value = b""
+
+        payload = bytes([0xDE, 0xAD, 0xBE, 0xEF])
+        header = pcap_pkthdr()
+        header.ts.tv_sec = 1
+        header.ts.tv_usec = 0
+        header.caplen = len(payload)
+        header.len = len(payload)
+        buf = (ctypes.c_ubyte * len(payload)).from_buffer_copy(payload)
+        state = {"calls": 0}
+
+        def next_ex(_handle, header_ptr, packet_ptr):
+            state["calls"] += 1
+            ctypes.cast(header_ptr, ctypes.POINTER(ctypes.c_void_p))[0] = ctypes.cast(
+                ctypes.pointer(header), ctypes.c_void_p
+            )
+            ctypes.cast(packet_ptr, ctypes.POINTER(ctypes.c_void_p))[0] = ctypes.cast(
+                buf, ctypes.c_void_p
+            )
+            return -2 if state["calls"] > 200 else 1
+
+        lib.pcap_next_ex.side_effect = next_ex
+
+        def fake_stats(handle, stats_ptr):
+            stats_ptr._obj.ps_drop = 7
+            return 0
+
+        lib.pcap_stats.side_effect = fake_stats
+
+        backend = PcapBackend(library=lib)
+        seen: list[int] = []
+        backend.on_kernel_drop = seen.append
+        backend.open("eth0")
+        backend.capture_loop(lambda raw: None)
+        assert seen == [7]
+
+    def test_kernel_stats_skipped_without_symbol(self):
+        """mock 库缺 pcap_stats 时不采样也不报错。"""
+        lib = _make_lib()
+        lib.pcap_open_live.return_value = 1234
+        lib.pcap_next_ex.side_effect = [1] * 5 + [-2]
+        backend = PcapBackend(library=lib)
+        assert backend._has_pcap_stats is False
+        backend.open("eth0")
+        backend.capture_loop(lambda raw: None)  # 不抛异常即可
+
+
+class TestAddressPairing:
+    @staticmethod
+    def _make_addr_chain(entries):
+        """entries: [(ip_bytes, mask_bytes_or_None), ...] → (pcap_if_t, keepalive)"""
+        addrs = []
+        for ip, mask in entries:
+            item = pcap_mod.pcap_addr_t()
+            sa = pcap_mod.sockaddr_in()
+            sa.sin_family = 2
+            sa.sin_addr = (ctypes.c_ubyte * 4)(*ip)
+            item.addr = ctypes.cast(ctypes.pointer(sa), ctypes.POINTER(pcap_mod.sockaddr))
+            if mask is not None:
+                sm = pcap_mod.sockaddr_in()
+                sm.sin_family = 2
+                sm.sin_addr = (ctypes.c_ubyte * 4)(*mask)
+                item.netmask = ctypes.cast(ctypes.pointer(sm), ctypes.POINTER(pcap_mod.sockaddr))
+            addrs.append((item, sa, sm if mask is not None else None))
+
+        for (item, _, _), (next_item, _, _) in zip(addrs, addrs[1:]):
+            item.next = ctypes.pointer(next_item)
+
+        dev = pcap_mod.pcap_if_t()
+        dev.name = b"eth0"
+        dev.addresses = (
+            ctypes.cast(ctypes.pointer(addrs[0][0]), ctypes.c_void_p) if addrs else None
+        )
+        keepalive = [obj for triplet in addrs for obj in triplet if obj is not None]
+        return dev, keepalive
+
+    def test_missing_netmask_keeps_pairing_aligned(self):
+        dev, keepalive = self._make_addr_chain(
+            [
+                (b"\x0a\x00\x00\x01", b"\xff\xff\xff\x00"),
+                (b"\xc0\xa8\x01\x01", None),
+            ]
+        )
+        ips, masks = pcap_mod._extract_device_addresses(dev)
+        assert ips == ["10.0.0.1", "192.168.1.1"]
+        # 第二个地址缺掩码时以默认值占位，不再错位配对
+        assert masks == ["255.255.255.0", "255.255.255.0"]
+
+    def test_single_address_without_mask(self):
+        dev, keepalive = self._make_addr_chain([(b"\x0a\x00\x00\x02", None)])
+        ips, masks = pcap_mod._extract_device_addresses(dev)
+        assert ips == ["10.0.0.2"]
+        assert masks == ["255.255.255.0"]

@@ -70,11 +70,18 @@ def read_header(path: str | Path) -> PcapFileHeader:
 def read_pcap(path: str | Path) -> Iterator[RawPacket]:
     """逐包读取 pcap 文件，产出 :class:`RawPacket`。
 
+    仅支持 Ethernet（DLT_EN10MB）链路类型：其他链路（如 ``tcpdump -i any``
+    的 Linux SLL）帧头长度不同，按 Ethernet 解析只会产出乱码，必须显式报错。
     容错策略：单个包记录头/载荷截断时抛出 :class:`PcapFileError`；调用方可
-    用 :func:`iter_pcap_safe` 容忍损坏文件并继续读取后续包。
+    用 :func:`iter_pcap_safe` 在记录级损坏时停在损坏处而非抛异常。
     """
     with open(path, "rb") as handle:
         header = _parse_header(handle)
+        if header.linktype != _LINKTYPE_ETHERNET:
+            raise PcapFileError(
+                f"不支持的链路类型 {header.linktype}（仅支持 Ethernet/DLT_EN10MB=1），"
+                "无法按以太网帧解析"
+            )
         divisor = 1_000_000_000 if header.nanosecond else 1_000_000
         order = header.byte_order
         while True:
@@ -96,18 +103,19 @@ def read_pcap(path: str | Path) -> Iterator[RawPacket]:
 
 
 def iter_pcap_safe(path: str | Path) -> Iterator[RawPacket]:
-    """与 :func:`read_pcap` 相同，但跳过损坏记录而非抛异常。"""
-    try:
-        iterator = read_pcap(path)
-        while True:
-            try:
-                yield next(iterator)
-            except StopIteration:
-                return
-            except PcapFileError:
-                return
-    except PcapFileError:
-        return
+    """逐包读取 pcap 文件，遇到损坏（文件头或包记录）时停止迭代而非抛异常。
+
+    返回损坏点之前已成功读取的全部包；不牺牲任何包数据，也不让坏文件
+    中断调用方。
+    """
+    iterator = read_pcap(path)
+    while True:
+        try:
+            yield next(iterator)
+        except StopIteration:
+            return
+        except PcapFileError:
+            return
 
 
 def write_pcap(path: str | Path, packets: Iterable[RawPacket], *, nanosecond: bool = False) -> int:
@@ -131,6 +139,8 @@ def write_pcap(path: str | Path, packets: Iterable[RawPacket], *, nanosecond: bo
             caplen = min(packet.captured_length, len(packet.data))
             original = max(packet.original_length, caplen)
             handle.write(struct.pack("<IIII", ts_sec, ts_frac, caplen, original))
-            handle.write(packet.data)
+            # 记录头声明的 caplen 必须与实际写入字节数一致，否则后续所有
+            # 记录边界错位，整个文件损坏
+            handle.write(packet.data[:caplen])
             count += 1
     return count

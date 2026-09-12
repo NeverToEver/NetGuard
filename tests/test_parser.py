@@ -333,3 +333,51 @@ def test_http_header_value_truncated() -> None:
     payload = b"GET / HTTP/1.1\r\nX-Long: " + b"B" * 5000 + b"\r\n\r\n"
     info = parse_packet(ethernet(ipv4(tcp(payload, dst_port=80))))
     assert len(info.http["headers"]["x-long"]) <= 512
+
+
+# --- VLAN (802.1Q / QinQ) ---
+
+def _vlan_tag(vid: int) -> bytes:
+    # 802.1Q 头 = TPID(0x8100) + TCI；解析器读 TCI 后取下 2 字节为内层 EtherType
+    return struct.pack("!HH", 0x8100, vid)
+
+
+def _tagged_frame(*tags: bytes, ethertype: int = 0x0800, payload: bytes = b"") -> bytes:
+    macs = b"\xaa\xbb\xcc\xdd\xee\xff" + b"\x11\x22\x33\x44\x55\x66"
+    frame = macs + b"".join(tags) + struct.pack("!H", ethertype) + payload
+    return frame
+
+
+def test_vlan_tagged_tcp_packet_parses() -> None:
+    inner = ipv4(tcp(b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"))
+    frame = _tagged_frame(_vlan_tag(100), payload=inner)
+    info = parse_packet(frame)
+    assert info.protocol == "HTTP"
+    assert info.ethernet["vlan_tags"] == [100]
+    assert info.dst_port == 80
+
+
+def test_qinq_double_tagged_packet_parses() -> None:
+    inner = ipv4(tcp(b"", flags=0x002))
+    frame = _tagged_frame(
+        struct.pack("!HH", 0x88A8, 200),  # 外层 802.1ad TPID+TCI
+        _vlan_tag(300),                   # 内层 802.1Q TPID+TCI
+        payload=inner,
+    )
+    info = parse_packet(frame)
+    assert info.protocol == "TCP"
+    assert info.ethernet["vlan_tags"] == [200, 300]
+    assert set(info.tcp["flags"]) == {"SYN"}
+
+
+def test_truncated_vlan_tag_returns_issue() -> None:
+    frame = b"\xaa\xbb\xcc\xdd\xee\xff" + b"\x11\x22\x33\x44\x55\x66" + b"\x81\x00\x0a"
+    info = parse_packet(frame)
+    assert info.issues and "802.1Q" in info.issues[0].message
+
+
+def test_vlan_packet_with_unknown_inner_ethertype() -> None:
+    frame = _tagged_frame(_vlan_tag(100), ethertype=0x86DD, payload=b"\x00" * 8)
+    info = parse_packet(frame)
+    assert info.ethernet["ethertype"] == 0x86DD
+    assert "0x86dd" in info.summary

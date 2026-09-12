@@ -43,6 +43,10 @@ class PacketInfo:
         return (self.src, self.src_port, self.dst, self.dst_port)
 
 
+#: 802.1Q / 802.1ad (QinQ 外层) / 802.1Q-in-Q 常见外层标签类型
+_VLAN_ETHERTYPES = (0x8100, 0x88A8, 0x9100)
+
+
 def parse_packet(raw: bytes, timestamp: float = 0.0, original_length: int | None = None) -> PacketInfo:
     info = PacketInfo(timestamp=timestamp, length=len(raw) if original_length is None else original_length, raw=raw)
     if len(raw) < 14:
@@ -54,10 +58,24 @@ def parse_packet(raw: bytes, timestamp: float = 0.0, original_length: int | None
         "src_mac": _mac(src_mac),
         "ethertype": ethertype,
     }
+    offset = 14
+    # VLAN tagged 流量（企业网/交换环境常见）：跳过 4 字节 TCI 取内层真实
+    # EtherType，否则所有 tagged 帧的解析与 IDS 检测整体失效
+    vlan_tags: list[int] = []
+    while ethertype in _VLAN_ETHERTYPES:
+        if len(raw) < offset + 4:
+            return _issue(info, "ethernet", "802.1Q 标签被截断")
+        tci = struct.unpack("!H", raw[offset : offset + 2])[0]
+        vlan_tags.append(tci & 0x0FFF)
+        ethertype = struct.unpack("!H", raw[offset + 2 : offset + 4])[0]
+        offset += 4
+    if vlan_tags:
+        info.ethernet["vlan_tags"] = vlan_tags
+        info.ethernet["ethertype"] = ethertype
     if ethertype != 0x0800:
         info.summary = f"EtherType 0x{ethertype:04x}"
         return info
-    return _parse_ipv4(info, raw, 14)
+    return _parse_ipv4(info, raw, offset)
 
 
 def _parse_ipv4(info: PacketInfo, raw: bytes, offset: int) -> PacketInfo:

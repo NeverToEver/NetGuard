@@ -122,3 +122,29 @@ def test_pipeline_replays_pcap_file(tmp_path) -> None:
     assert pipeline.replay_finished is True
     assert len(collected) == 10
     assert all(event.packet.protocol for event in collected)
+
+
+def test_write_pcap_clamps_data_to_declared_caplen(tmp_path) -> None:
+    """captured_length < len(data) 时必须截断数据体，写出的文件可完整回读。"""
+    frame = b"\x00" * 60
+    raw = RawPacket(1.0, frame, captured_length=20, original_length=100)
+    path = tmp_path / "mismatch.pcap"
+    assert write_pcap(path, [raw]) == 1
+    packets = list(read_pcap(path))
+    assert len(packets) == 1
+    assert packets[0].data == frame[:20]
+    assert packets[0].captured_length == 20
+
+
+def test_read_pcap_rejects_non_ethernet_linktype(tmp_path) -> None:
+    """Linux SLL (113) 等非 Ethernet 链路类型必须显式报错，不能静默乱码。"""
+    path = tmp_path / "sll.pcap"
+    with open(path, "wb") as handle:
+        handle.write(b"\xd4\xc3\xb2\xa1")
+        handle.write(struct.pack("<HHiIII", 2, 4, 0, 0, 262_144, 113))
+        handle.write(struct.pack("<IIII", 1, 0, 4, 4))
+        handle.write(b"\x00" * 4)
+    with pytest.raises(PcapFileError, match="链路类型"):
+        list(read_pcap(path))
+    # iter_pcap_safe 停止迭代而非抛异常
+    assert list(iter_pcap_safe(path)) == []

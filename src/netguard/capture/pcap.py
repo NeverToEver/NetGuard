@@ -75,18 +75,46 @@ class bpf_program(ctypes.Structure):
 
 
 class sockaddr(ctypes.Structure):
-    _fields_ = [
-        ("sa_family", ctypes.c_ushort),
-        ("sa_data", ctypes.c_char * 14),
-    ]
+    """BSD/macOS 的 sockaddr 以 1 字节 sa_len 开头、sa_family 为 uint8；
+    Linux/Windows 的 sa_family 是开头的 16 位字段。按平台声明，否则 macOS
+    上 family 永远对不上 AF_INET，设备 IP 地址静默解析为空。"""
+
+    if sys.platform == "darwin":
+        _fields_ = [
+            ("sa_len", ctypes.c_ubyte),
+            ("sa_family", ctypes.c_ubyte),
+            ("sa_data", ctypes.c_char * 14),
+        ]
+    else:
+        _fields_ = [
+            ("sa_family", ctypes.c_ushort),
+            ("sa_data", ctypes.c_char * 14),
+        ]
 
 
 class sockaddr_in(ctypes.Structure):
+    if sys.platform == "darwin":
+        _fields_ = [
+            ("sin_len", ctypes.c_ubyte),
+            ("sin_family", ctypes.c_ubyte),
+            ("sin_port", ctypes.c_ushort),
+            ("sin_addr", ctypes.c_ubyte * 4),
+            ("sin_zero", ctypes.c_char * 8),
+        ]
+    else:
+        _fields_ = [
+            ("sin_family", ctypes.c_ushort),
+            ("sin_port", ctypes.c_ushort),
+            ("sin_addr", ctypes.c_ubyte * 4),
+            ("sin_zero", ctypes.c_char * 8),
+        ]
+
+
+class pcap_stat(ctypes.Structure):
     _fields_ = [
-        ("sin_family", ctypes.c_ushort),
-        ("sin_port", ctypes.c_ushort),
-        ("sin_addr", ctypes.c_ubyte * 4),
-        ("sin_zero", ctypes.c_char * 8),
+        ("ps_recv", ctypes.c_uint32),
+        ("ps_drop", ctypes.c_uint32),
+        ("ps_ifdrop", ctypes.c_uint32),
     ]
 
 
@@ -106,23 +134,31 @@ _AF_INET = 2
 
 
 def _extract_device_addresses(item: pcap_if_t) -> tuple[list[str], list[str]]:
+    """按地址项逐个配对 IP 与掩码。
+
+    不能对 IP 和掩码各自独立收集：单个地址项缺 netmask（点对点/部分 VPN
+    虚拟网卡常见）会让两个列表错位，把别的地址的掩码配给当前 IP。
+    缺掩码时以默认值占位保持一一对应。
+    """
     ips: list[str] = []
     netmasks: list[str] = []
     addr_cursor = item.addresses
     while addr_cursor:
         pcap_addr = ctypes.cast(addr_cursor, ctypes.POINTER(pcap_addr_t)).contents
-        if pcap_addr.addr:
-            sa = pcap_addr.addr.contents
-            if sa.sa_family == _AF_INET:
-                sin = ctypes.cast(pcap_addr.addr, ctypes.POINTER(sockaddr_in)).contents
-                ips.append(".".join(str(b) for b in sin.sin_addr))
-        if pcap_addr.netmask:
-            sa = pcap_addr.netmask.contents
-            if sa.sa_family == _AF_INET:
-                sin = ctypes.cast(pcap_addr.netmask, ctypes.POINTER(sockaddr_in)).contents
-                netmasks.append(".".join(str(b) for b in sin.sin_addr))
+        if pcap_addr.addr and _is_inet(pcap_addr.addr):
+            sin = ctypes.cast(pcap_addr.addr, ctypes.POINTER(sockaddr_in)).contents
+            ips.append(".".join(str(b) for b in sin.sin_addr))
+            if pcap_addr.netmask and _is_inet(pcap_addr.netmask):
+                mask = ctypes.cast(pcap_addr.netmask, ctypes.POINTER(sockaddr_in)).contents
+                netmasks.append(".".join(str(b) for b in mask.sin_addr))
+            else:
+                netmasks.append("255.255.255.0")
         addr_cursor = pcap_addr.next if pcap_addr.next else None
     return ips, netmasks
+
+
+def _is_inet(sa_ptr: "ctypes.POINTER(sockaddr)") -> bool:
+    return bool(sa_ptr) and sa_ptr.contents.sa_family == _AF_INET
 
 
 class PcapBackend:
@@ -141,6 +177,12 @@ class PcapBackend:
 
     def __init__(self, library: ctypes.CDLL | None = None) -> None:
         self.lib = library or self._load_library()
+        # 内核级丢包采样（pcap_stats 可用时启用）：raw_queue 之外，
+        # BPF/内核缓冲区丢弃的包对用户同样不可见，需要并入丢包统计
+        self._has_pcap_stats = hasattr(self.lib, "pcap_stats")
+        self._ps_drop_seen = 0
+        self._poll_counter = 0
+        self.on_kernel_drop: Callable[[int], None] | None = None
         self._configure()
         self._handle: ctypes.c_void_p | None = None
         self._handle_lock = threading.Lock()
@@ -182,6 +224,7 @@ class PcapBackend:
         self.lib.pcap_findalldevs.argtypes = [ctypes.POINTER(ctypes.POINTER(pcap_if_t)), ctypes.c_char_p]
         self.lib.pcap_findalldevs.restype = ctypes.c_int
         self.lib.pcap_freealldevs.argtypes = [ctypes.POINTER(pcap_if_t)]
+        self.lib.pcap_freealldevs.restype = None
         self.lib.pcap_open_live.argtypes = [
             ctypes.c_char_p,
             ctypes.c_int,
@@ -208,10 +251,16 @@ class PcapBackend:
         self.lib.pcap_setfilter.argtypes = [ctypes.c_void_p, ctypes.POINTER(bpf_program)]
         self.lib.pcap_setfilter.restype = ctypes.c_int
         self.lib.pcap_freecode.argtypes = [ctypes.POINTER(bpf_program)]
+        self.lib.pcap_freecode.restype = None
         self.lib.pcap_geterr.argtypes = [ctypes.c_void_p]
         self.lib.pcap_geterr.restype = ctypes.c_char_p
         self.lib.pcap_breakloop.argtypes = [ctypes.c_void_p]
         self.lib.pcap_breakloop.restype = None
+        # pcap_stats 在现实 libpcap/Npcap 上普遍存在，但不进必需符号表，
+        # 避免极简 mock 库被迫提供它
+        if self._has_pcap_stats:
+            self.lib.pcap_stats.argtypes = [ctypes.c_void_p, ctypes.POINTER(pcap_stat)]
+            self.lib.pcap_stats.restype = ctypes.c_int
 
     def list_devices(self) -> list[CaptureDevice]:
         errbuf = ctypes.create_string_buffer(256)
@@ -248,6 +297,8 @@ class PcapBackend:
             raise PcapError(errbuf.value.decode(errors="replace"))
         self._handle = handle
         self._stop.clear()
+        self._ps_drop_seen = 0
+        self._poll_counter = 0
         if bpf_filter:
             try:
                 self.set_filter(bpf_filter)
@@ -293,12 +344,30 @@ class PcapBackend:
                     data = ctypes.string_at(packet, h.caplen)
                     ts = float(h.ts.tv_sec) + float(h.ts.tv_usec) / 1_000_000.0
                     callback(RawPacket(ts, data, h.caplen, h.len))
+                    self._poll_kernel_stats(handle)
                 elif rc == 0:
                     time.sleep(0.001)
                 elif rc == -2:
                     break
                 else:
                     raise PcapError(self._last_error())
+
+    _STATS_POLL_INTERVAL = 200
+
+    def _poll_kernel_stats(self, handle) -> None:
+        """周期采样 pcap_stats，把内核/BPF 缓冲区丢弃并入丢包统计。"""
+        if not self._has_pcap_stats:
+            return
+        self._poll_counter += 1
+        if self._poll_counter < self._STATS_POLL_INTERVAL:
+            return
+        self._poll_counter = 0
+        stats = pcap_stat()
+        if self.lib.pcap_stats(handle, ctypes.byref(stats)) != 0:
+            return
+        if stats.ps_drop > self._ps_drop_seen and self.on_kernel_drop:
+            self.on_kernel_drop(stats.ps_drop - self._ps_drop_seen)
+        self._ps_drop_seen = stats.ps_drop
 
     def stop(self) -> None:
         self._stop.set()
@@ -317,9 +386,17 @@ class PcapBackend:
                 self.lib.pcap_close(self._handle)
                 self._handle = None
 
-    def _wait_for_capture_loop(self) -> None:
-        with self._capture_lock:
-            pass
+    def _wait_for_capture_loop(self, timeout: float = 5.0) -> None:
+        """等待抓包循环让出 _capture_lock（即退出循环）。
+
+        个别无线/USB 驱动下 pcap_breakloop 可能无法唤醒阻塞中的 pcap_next_ex；
+        无限期等待会让 stop()/close() 永久挂起（GUI 冻结），超时后降级为告警。
+        """
+        acquired = self._capture_lock.acquire(timeout=timeout)
+        if not acquired:
+            logger.warning("等待抓包线程退出超时（%.0f 秒），放弃等待并继续关闭", timeout)
+            return
+        self._capture_lock.release()
 
     def _last_error(self) -> str:
         if not self._handle:

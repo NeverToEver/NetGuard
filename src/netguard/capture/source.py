@@ -74,6 +74,11 @@ class CaptureSource:
                 self._dropped_count += 1
             return self._dropped_count
 
+    def add_dropped(self, count: int) -> None:
+        """批量累加丢包（用于并入 pcap_stats 报告的内核级丢弃）。"""
+        with self._dropped_lock:
+            self._dropped_count = min(self._dropped_count + count, self._max_dropped)
+
     def enqueue_raw(self, raw: RawPacket, *, count_drop: bool = True) -> bool:
         """入队原始包；队列满时返回 False（``count_drop`` 控制是否计入丢包）。"""
         try:
@@ -164,7 +169,10 @@ class CaptureSource:
 
     def _capture_worker(self) -> None:
         try:
-            self.backend.capture_loop(self.enqueue_raw)
+            backend = self.backend
+            # pcap_stats 采样的内核/BPF 丢弃并入统一丢包计数
+            backend.on_kernel_drop = self.add_dropped
+            backend.capture_loop(self.enqueue_raw)
         except Exception as exc:
             logger.exception("抓包循环异常终止")
             detail = str(exc) or exc.__class__.__name__
