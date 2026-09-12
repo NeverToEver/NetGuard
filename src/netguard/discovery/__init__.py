@@ -1,4 +1,5 @@
 from netguard.discovery.subnet import (
+    MAX_SWEEP_HOSTS,
     HostInfo,
     SubnetInfo,
     detect_subnet_os_fallback,
@@ -12,6 +13,7 @@ from netguard.discovery.subnet import (
 )
 
 __all__ = [
+    "MAX_SWEEP_HOSTS",
     "HostInfo",
     "SubnetInfo",
     "detect_subnet_os_fallback",

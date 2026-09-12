@@ -4,6 +4,7 @@ import ipaddress
 import json
 import logging
 import queue
+import re
 import sys
 import threading
 import time
@@ -37,7 +38,7 @@ from netguard.parser.packet import PacketInfo, hex_dump
 from netguard.pipeline import PacketEvent, PacketPipeline, PipelineStatus
 from netguard.rules.suggestions import RuleSuggestion, generate_rule_suggestions
 from netguard.trafficgen import TEMPLATES, PacketTemplate, TrafficGenerator
-from netguard.discovery import HostInfo, SubnetInfo, detect_subnet_os_fallback, extract_subnets, ping_host, ping_sweep, resolve_hosts, subnet_to_bpf
+from netguard.discovery import (MAX_SWEEP_HOSTS, HostInfo, SubnetInfo, detect_subnet_os_fallback, extract_subnets, ping_host, ping_sweep, resolve_hosts, subnet_to_bpf)
 
 logger = logging.getLogger(__name__)
 MAX_TABLE_ROWS = 5000
@@ -50,10 +51,11 @@ REFILTER_BATCH = 400
 SYSTEM_THEME_POLL_MS = 5000
 CONFIG_SAVE_DEBOUNCE_MS = 800
 
-#: 快捷键定义：(菜单标签, 加速键, Tk 事件序列, 回调名)
+#: 快捷键定义：(菜单标签, 加速键, Tk 事件序列)
 SHORTCUTS: list[tuple[str, str, str]] = [
     ("开始抓包", "F5", "<F5>"),
     ("停止抓包", "Shift+F5", "<Shift-F5>"),
+    ("停止抓包（输入框聚焦时不触发）", "Esc", "<Escape>"),
     ("暂停/恢复", "Ctrl+P", "<Control-p>"),
     ("清空数据", "Ctrl+L", "<Control-l>"),
     ("打开 pcap", "Ctrl+O", "<Control-o>"),
@@ -186,6 +188,7 @@ def wire_dialog_theme(dialog: tk.Toplevel, parent: tk.Misc, classic_widgets: lis
                     "background": colors["field"], "foreground": colors["text"],
                     "insertbackground": colors["text"],
                     "selectbackground": colors["select"], "selectforeground": colors["select_text"],
+                    "highlightbackground": colors["border"], "highlightcolor": colors["accent"],
                 }
                 widget.configure(**{k: v for k, v in options.items() if k in supported})
             except tk.TclError:
@@ -299,7 +302,7 @@ class NetGuardApp(tk.Tk):
         return detect_system_dark()
 
     def _restore_window_state(self) -> None:
-        geometry = self._config.window.geometry
+        geometry = self._clamped_geometry(self._config.window.geometry)
         if geometry:
             try:
                 self.geometry(geometry)
@@ -316,6 +319,25 @@ class NetGuardApp(tk.Tk):
                     self.attributes("-zoomed", True)
                 except tk.TclError:
                     pass
+
+    def _clamped_geometry(self, geometry: str) -> str:
+        """恢复窗口位置时按当前屏幕钳制，外接显示器拔掉后窗口不至于整个在屏外。"""
+        geometry = geometry.strip()
+        if not geometry:
+            return ""
+        match = re.match(r"^(?:(\d+)x(\d+))?([+-]\d+)([+-]\d+)$", geometry)
+        if not match:
+            return geometry
+        width, height, x_text, y_text = match.groups()
+        x, y = int(x_text), int(y_text)
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+        max_x = max(0, screen_w - (int(width) if width else 0) - 40)
+        max_y = max(0, screen_h - (int(height) if height else 0) - 80)
+        x = min(max(0, x), max_x)
+        y = min(max(0, y), max_y)
+        size = f"{width}x{height}" if width else ""
+        return f"{size}+{x}+{y}"
 
     def _set_window_icon(self) -> None:
         try:
@@ -336,9 +358,20 @@ class NetGuardApp(tk.Tk):
             self._capture_indicator.configure(bg=colors["toolbar"])
         for menu in self._menus:
             apply_menu(menu, colors)
+        self._refresh_alert_colors()
         self._update_indicator()
         self.event_generate("<<ThemeChanged>>", when="tail")
         self._schedule_config_save()
+
+    def _refresh_alert_colors(self) -> None:
+        """主题切换后重刷既有告警行前景色（per-item 颜色只在插入时设置过）。"""
+        if self.alerts_placeholder:
+            return
+        for index in range(self.alerts.size()):
+            try:
+                self.alerts.itemconfigure(index, fg=self._alert_color(self.alerts.get(index, index)))
+            except tk.TclError:
+                return
 
     def _set_theme_mode(self, mode: str) -> None:
         self.theme_mode.set(mode)
@@ -653,7 +686,9 @@ class NetGuardApp(tk.Tk):
         ]
         for widget, text in pairs:
             if widget is not None:
-                self._tooltips.append(Tooltip(widget, text, dark=self.dark_mode.get()))
+                self._tooltips.append(
+                    Tooltip(widget, text, dark=self.dark_mode.get(), dark_provider=lambda: self.dark_mode.get())
+                )
 
     def _build_menu(self) -> None:
         menubar = tk.Menu(self, tearoff=0)
@@ -721,10 +756,22 @@ class NetGuardApp(tk.Tk):
             "<Control-f>": self._focus_display_filter,
             "<Control-q>": self._exit,
             "<F1>": self._show_shortcuts,
-            "<Escape>": self._stop,
+            "<Escape>": self._on_escape,
         }
         for sequence, callback in mapping.items():
             self.bind(sequence, lambda _event, cb=callback: cb())
+        # Tk Text 类绑定了 <Control-o>（自插入换行），与"打开 pcap"冲突：
+        # 在每个 Text 上拦截该序列，一次按键只触发主窗口动作
+        for text in (self._log_text, self.detail, self.hex_view, self.stats_text, self.rules_text):
+            if text is not None:
+                text.bind("<Control-o>", lambda _event: "break")
+
+    def _on_escape(self) -> None:
+        # 焦点在输入框时 Esc 是取消/收起输入的惯例，不应弹"停止抓包"确认框
+        focused = self.focus_get()
+        if isinstance(focused, (tk.Entry, ttk.Entry, tk.Text, ttk.Combobox, tk.Spinbox)):
+            return
+        self._stop()
 
     def _focus_display_filter(self) -> None:
         self.display_filter_entry.focus_set()
@@ -795,6 +842,7 @@ class NetGuardApp(tk.Tk):
         path = filedialog.asksaveasfilename(
             defaultextension=".csv",
             filetypes=[("CSV 文件", "*.csv"), ("所有文件", "*.*")],
+            parent=self,
         )
         if not path:
             return
@@ -1068,11 +1116,6 @@ class NetGuardApp(tk.Tk):
                 self._log(f"非推荐网卡，建议选择 {recommended.friendly_name}（{reason}）")
         self._update_control_states()
 
-    def _show_device_error(self, error: str) -> None:
-        logger.error("网卡加载失败：%s", error)
-        self._log("网卡加载失败")
-        messagebox.showwarning("Npcap/libpcap", error)
-
     def _load_rules(self) -> None:
         text = self.rules_text.get("1.0", tk.END)
 
@@ -1109,7 +1152,7 @@ class NetGuardApp(tk.Tk):
     def _open_subnet_scan(self) -> None:
         display = self._selected_device_display()
         if display is None:
-            messagebox.showwarning("网段扫描", "请先在主窗口选择一个网卡。")
+            messagebox.showwarning("网段扫描", "请先在主窗口选择一个网卡。", parent=self)
             return
         SubnetScanDialog(self, display, self.device_displays, self.bpf_var,
                         on_switch_device=self._switch_to_device,
@@ -1146,7 +1189,7 @@ class NetGuardApp(tk.Tk):
         if self.capturing:
             device = self._selected_device_name()
             if not device:
-                messagebox.showwarning("网卡", "请先选择一个网络接口。")
+                messagebox.showwarning("网卡", "请先选择一个网络接口。", parent=self)
                 return
             alert_count = self._real_alert_count()
             packet_count = len(self.events)
@@ -1180,18 +1223,19 @@ class NetGuardApp(tk.Tk):
                 self._active_bpf_filter = ""
                 self._update_control_states()
                 self._log("应用 BPF 后抓包启动失败")
-                messagebox.showerror("抓包错误", str(exc))
+                messagebox.showerror("抓包错误", str(exc), parent=self)
         else:
             self.bpf_var.set(value)
             self._log(f"BPF 过滤条件已更新，开始抓包时生效：{self._format_bpf_for_log(value)}")
 
     def _open_pcap(self) -> None:
         if self.capturing:
-            messagebox.showinfo("打开 pcap", "请先停止当前抓包，再打开 pcap 文件。")
+            messagebox.showinfo("打开 pcap", "请先停止当前抓包，再打开 pcap 文件。", parent=self)
             return
         path = filedialog.askopenfilename(
             title="打开 pcap 文件",
             filetypes=[("pcap 文件", "*.pcap *.cap"), ("所有文件", "*.*")],
+            parent=self,
         )
         if not path:
             return
@@ -1207,7 +1251,7 @@ class NetGuardApp(tk.Tk):
         except Exception as exc:
             self.capturing = False
             self._update_control_states()
-            messagebox.showerror("打开失败", str(exc))
+            messagebox.showerror("打开失败", str(exc), parent=self)
 
     def _save_pcap(self) -> None:
         if not self.events:
@@ -1216,6 +1260,7 @@ class NetGuardApp(tk.Tk):
         path = filedialog.asksaveasfilename(
             defaultextension=".pcap",
             filetypes=[("pcap 文件", "*.pcap"), ("所有文件", "*.*")],
+            parent=self,
         )
         if not path:
             return
@@ -1272,10 +1317,12 @@ class NetGuardApp(tk.Tk):
                 self.table.column(col, width=width)
             except tk.TclError:
                 continue
-        if window.sort_column:
+        if window.sort_column in {"time", "src", "dst", "proto", "len", "summary"}:
             self._sort_column = window.sort_column
             self._sort_descending = window.sort_descending
             self._update_sort_indicator()
+        # 未知列名（配置损坏/旧版残留）直接丢弃：恢复后首次过滤重建会在
+        # 排序步骤抛 TclError，中断整个重建链
         # 上次网卡在设备异步加载完成后恢复（见 _set_devices）
 
     def _apply_saved_sashes(self) -> None:
@@ -1307,7 +1354,7 @@ class NetGuardApp(tk.Tk):
 
     def _show_rule_suggestions(self) -> None:
         if not self.events:
-            messagebox.showinfo("自动生成规则", "当前还没有可用于生成 IDS 规则的 TCP、UDP、HTTP 或 DNS 数据包。")
+            messagebox.showinfo("自动生成规则", "当前还没有可用于生成 IDS 规则的 TCP、UDP、HTTP 或 DNS 数据包。", parent=self)
             return
         self._log("正在分析数据包生成 IDS 规则建议...")
         # 主线程快照，避免后台线程遍历 self.events 时与 _tick 的裁剪竞争
@@ -1322,7 +1369,7 @@ class NetGuardApp(tk.Tk):
     def _show_suggestions_result(self, suggestions: list) -> None:
         if not suggestions:
             self._log("自动生成规则：无可用建议")
-            messagebox.showinfo("自动生成规则", "当前还没有可用于生成 IDS 规则的 TCP、UDP、HTTP 或 DNS 数据包。")
+            messagebox.showinfo("自动生成规则", "当前还没有可用于生成 IDS 规则的 TCP、UDP、HTTP 或 DNS 数据包。", parent=self)
             return
         self._log(f"自动生成规则：已生成 {len(suggestions)} 条建议")
         RuleSuggestionDialog(self, suggestions, self._append_generated_rules)
@@ -1338,9 +1385,12 @@ class NetGuardApp(tk.Tk):
         self._log(f"已添加 {len(rules)} 条自动生成的 IDS 规则")
 
     def _start(self) -> None:
+        if self.capturing:
+            # F5 快捷键绕过按钮禁用状态；抓包中重复 start 会静默重启并清零统计
+            return
         device = self._selected_device_name()
         if not device:
-            messagebox.showwarning("网卡", "请先选择一个网络接口。")
+            messagebox.showwarning("网卡", "请先选择一个网络接口。", parent=self)
             return
         bpf_filter = self.bpf_var.get().strip()
         self.bpf_var.set(bpf_filter)
@@ -1358,7 +1408,7 @@ class NetGuardApp(tk.Tk):
             self._active_bpf_filter = ""
             self._update_control_states()
             self._log("抓包启动失败")
-            messagebox.showerror("抓包错误", str(exc))
+            messagebox.showerror("抓包错误", str(exc), parent=self)
 
     def _stop(self) -> None:
         if not self.capturing:
@@ -1387,8 +1437,29 @@ class NetGuardApp(tk.Tk):
             self.pipeline.stop()
             self.capturing = False
             self.paused = False
+        # 后台写盘线程是 daemon，直接 destroy 会被硬杀，保存的 pcap/告警
+        # 文件静默截断；退出前在主线程等待任务排空
+        self._wait_background_tasks()
         self._save_config()
         self.destroy()
+
+    def _wait_background_tasks(self, timeout: float = 10.0) -> None:
+        """等待后台任务（保存 pcap、导出告警等）完成再退出。"""
+        if self._busy_count <= 0:
+            return
+        self._begin_busy("正在等待后台写盘完成…")
+        deadline = time.monotonic() + timeout
+        try:
+            while self._busy_count > 1 and time.monotonic() < deadline:
+                self._pump_background()
+                try:
+                    self.update_idletasks()
+                except tk.TclError:
+                    break
+                time.sleep(0.02)
+            self._pump_background()
+        finally:
+            self._end_busy()
 
     def _toggle_pause(self) -> None:
         if not self.capturing:
@@ -1764,6 +1835,7 @@ class NetGuardApp(tk.Tk):
         path = filedialog.asksaveasfilename(
             defaultextension=".json",
             filetypes=[("JSON 告警", "*.json"), ("日志", "*.log"), ("文本", "*.txt")],
+            parent=self,
         )
         if not path:
             return
@@ -2303,8 +2375,13 @@ class SubnetScanDialog(tk.Toplevel):
         self._host_infos: dict[str, HostInfo] = {}
         self._scanning = False
         self._resolving = False
-        self._cancel_event = threading.Event()
-        self._after_ids: list[str] = []
+        # 扫描与解析各用独立的取消事件：共享一个会互相取消/互相抹掉取消标志
+        self._scan_cancel = threading.Event()
+        self._resolve_cancel = threading.Event()
+        # 工作线程只往队列投递事件，由主线程轮询消费——绝不在子线程调用 Tk
+        # （winfo_exists/after 在非 mainloop 线程下依赖 _tkinter 私有 marshaling）
+        self._event_queue: "queue.Queue[tuple[str, tuple]]" = queue.Queue()
+        self.after(80, self._drain_events)
         colors = build_colors(parent.dark_mode.get())
         self.configure(background=colors["bg"])
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -2408,14 +2485,30 @@ class SubnetScanDialog(tk.Toplevel):
         self.bind("<Escape>", lambda _e: self._on_close())
         wire_dialog_theme(self, parent, [self._host_list, self._detail_text])
 
-    def _safe_after(self, delay_ms: int, callback) -> None:
-        if not self.winfo_exists():
-            return
+    def _post_event(self, name: str, *args) -> None:
+        """工作线程调用：只投递事件，绝不直接触碰 Tk。"""
+        self._event_queue.put((name, args))
+
+    def _drain_events(self) -> None:
+        """主线程轮询消费工作线程事件；对话框销毁后轮询链自然终止。"""
         try:
-            aid = self.after(delay_ms, callback)
+            while True:
+                name, args = self._event_queue.get_nowait()
+                handler = getattr(self, f"_ev_{name}", None)
+                if handler is None:
+                    continue
+                try:
+                    handler(*args)
+                except tk.TclError:
+                    return
+                except Exception:
+                    logger.exception("处理网段扫描事件失败：%s", name)
+        except queue.Empty:
+            pass
+        try:
+            self.after(80, self._drain_events)
         except tk.TclError:
             return
-        self._after_ids.append(aid)
 
     def _no_ipv4_status(self) -> str:
         if self._displays_with_ip:
@@ -2499,9 +2592,21 @@ class SubnetScanDialog(tk.Toplevel):
         except ValueError:
             messagebox.showwarning("手动网段", f"无效的 CIDR 格式：{cidr}\n\n请输入如 192.168.1.0/24 的格式。", parent=self)
             return
-        hosts = list(net.hosts())
-        total = len(hosts)
-        gw = str(hosts[0]) if hosts else str(net.network_address)
+        # 大小校验必须在任何展开之前：list(net.hosts()) 物化 /8 会构造
+        # 1677 万个对象（GB 级内存、主线程冻结数十秒）
+        if net.num_addresses > MAX_SWEEP_HOSTS:
+            messagebox.showwarning(
+                "手动网段",
+                f"网段过大（{net.num_addresses} 个地址，上限 {MAX_SWEEP_HOSTS}）。\n\n"
+                "请使用 /21 或更小前缀的网段。",
+                parent=self,
+            )
+            return
+        if net.prefixlen >= 31:
+            total = net.num_addresses
+        else:
+            total = net.num_addresses - 2  # 去网络地址与广播地址
+        gw = str(net.network_address + 1) if net.prefixlen <= 30 else str(net.network_address)
         is_lab = 2 < total <= 254
         subnet = SubnetInfo(
             cidr=f"{net.network_address}/{net.prefixlen}",
@@ -2525,11 +2630,15 @@ class SubnetScanDialog(tk.Toplevel):
 
     def _toggle_scan(self) -> None:
         if self._scanning:
-            self._cancel_event.set()
+            self._scan_cancel.set()
+            return
+        if not self._subnets:
             return
         self._scanning = True
-        self._cancel_event.clear()
+        self._scan_cancel.clear()
         self._scan_btn.configure(text="停止扫描", style="Danger.TButton")
+        # 扫描与解析互斥：并发运行会争用状态栏与主机列表
+        self._resolve_btn.configure(state=tk.DISABLED)
         self._status_var.set("正在扫描...")
         self._host_list.delete(0, tk.END)
         self._alive_hosts.clear()
@@ -2540,25 +2649,27 @@ class SubnetScanDialog(tk.Toplevel):
 
     def _run_sweep(self, subnet: SubnetInfo) -> None:
         def on_progress(completed: int, total: int, last_ip: str) -> None:
-            self._safe_after(0, lambda c=completed, t=total, ip=last_ip: self._sweep_progress(c, t, ip))
+            self._post_event("sweep_progress", completed, total, last_ip)
 
         hosts = ping_sweep(subnet, max_workers=100, timeout=0.8, on_progress=on_progress,
-                           cancel_event=self._cancel_event)
-        self._safe_after(0, lambda h=hosts: self._sweep_done(h))
+                           cancel_event=self._scan_cancel)
+        self._post_event("sweep_done", hosts)
 
-    def _sweep_progress(self, completed: int, total: int, last_ip: str) -> None:
+    def _ev_sweep_progress(self, completed: int, total: int, last_ip: str) -> None:
         self._status_var.set(f"扫描中 {completed}/{total} — {last_ip}")
 
-    def _sweep_done(self, hosts: list[str]) -> None:
+    def _ev_sweep_done(self, hosts: list[str]) -> None:
         self._scanning = False
-        self._cancel_event.clear()
         self._scan_btn.configure(text="重新扫描", style="Accent.TButton")
+        if self._subnets:
+            self._scan_btn.configure(state=tk.NORMAL)
         self._alive_hosts = hosts
         if not hosts:
             self._status_var.set("扫描完成 — 未发现活跃主机")
             return
         self._status_var.set(f"扫描完成 — 发现 {len(hosts)} 台活跃主机")
-        self._resolve_btn.configure(state=tk.NORMAL)
+        if not self._resolving:
+            self._resolve_btn.configure(state=tk.NORMAL)
         for ip in hosts:
             self._host_list.insert(tk.END, ip)
 
@@ -2597,10 +2708,10 @@ class SubnetScanDialog(tk.Toplevel):
         for ip in ips:
             ok = ping_host(ip, timeout=2.0)
             results.append((ip, ok))
-            self._safe_after(0, lambda r=results[:]: self._ping_progress(r))
-        self._safe_after(0, lambda r=results: self._ping_done(r))
+            self._post_event("ping_progress", results[:])
+        self._post_event("ping_done", results)
 
-    def _ping_progress(self, results: list[tuple[str, bool]]) -> None:
+    def _ev_ping_progress(self, results: list[tuple[str, bool]]) -> None:
         lines = [f"Ping 进度 ({len(results)} 台):"]
         for ip, ok in results:
             status = "通" if ok else "不通"
@@ -2608,19 +2719,20 @@ class SubnetScanDialog(tk.Toplevel):
         self._detail_text.delete("1.0", tk.END)
         self._detail_text.insert("1.0", "\n".join(lines))
 
-    def _ping_done(self, results: list[tuple[str, bool]]) -> None:
+    def _ev_ping_done(self, results: list[tuple[str, bool]]) -> None:
         ok_count = sum(1 for _, ok in results if ok)
         self._status_var.set(f"Ping 完成 — {ok_count}/{len(results)} 通")
         self._ping_btn.configure(state=tk.NORMAL)
 
     def _toggle_resolve(self) -> None:
         if self._resolving:
-            self._cancel_event.set()
+            self._resolve_cancel.set()
             return
         if not self._alive_hosts:
             return
         self._resolving = True
-        self._cancel_event.clear()
+        self._resolve_cancel.clear()
+        self._scan_btn.configure(state=tk.DISABLED)
         self._host_infos.clear()
         self._resolve_btn.configure(text="停止解析", style="Danger.TButton")
         self._status_var.set("正在解析主机名...")
@@ -2629,19 +2741,20 @@ class SubnetScanDialog(tk.Toplevel):
 
     def _run_resolve(self) -> None:
         def on_progress(completed: int, total: int, last_ip: str) -> None:
-            self._safe_after(0, lambda c=completed, t=total, ip=last_ip: self._resolve_progress(c, t, ip))
+            self._post_event("resolve_progress", completed, total, last_ip)
 
         infos = resolve_hosts(self._alive_hosts, max_workers=40, timeout=2.0, on_progress=on_progress,
-                              cancel_event=self._cancel_event)
-        self._safe_after(0, lambda i=infos: self._resolve_done(i))
+                              cancel_event=self._resolve_cancel)
+        self._post_event("resolve_done", infos)
 
-    def _resolve_progress(self, completed: int, total: int, last_ip: str) -> None:
+    def _ev_resolve_progress(self, completed: int, total: int, last_ip: str) -> None:
         self._status_var.set(f"解析中 {completed}/{total} — {last_ip}")
 
-    def _resolve_done(self, infos: dict[str, HostInfo]) -> None:
+    def _ev_resolve_done(self, infos: dict[str, HostInfo]) -> None:
         self._resolving = False
-        self._cancel_event.clear()
         self._resolve_btn.configure(text="重新解析", style="Secondary.TButton")
+        if self._subnets:
+            self._scan_btn.configure(state=tk.NORMAL)
         self._host_infos = infos
         resolved = sum(1 for info in infos.values() if info.hostname)
         self._status_var.set(f"解析完成 — {resolved}/{len(infos)} 台获取到主机名")
@@ -2664,25 +2777,13 @@ class SubnetScanDialog(tk.Toplevel):
         self.destroy()
 
     def _on_close(self) -> None:
-        if self._scanning:
-            self._cancel_event.set()
-        for aid in self._after_ids:
-            try:
-                self.after_cancel(aid)
-            except Exception:
-                pass
-        self._after_ids.clear()
+        self._scan_cancel.set()
+        self._resolve_cancel.set()
         self.destroy()
 
     def destroy(self) -> None:
-        if self._scanning:
-            self._cancel_event.set()
-        for aid in self._after_ids:
-            try:
-                self.after_cancel(aid)
-            except Exception:
-                pass
-        self._after_ids.clear()
+        self._scan_cancel.set()
+        self._resolve_cancel.set()
         super().destroy()
 
 

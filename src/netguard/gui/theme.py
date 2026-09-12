@@ -284,4 +284,10 @@ class ThemeManager:
         table.tag_configure("dns", foreground=colors["info"])
         table.tag_configure("issue", foreground=colors["danger"])
         for widget in classic_widgets:
+            try:
+                if not widget.winfo_exists():
+                    continue
+            except tk.TclError:
+                continue
+            # 已销毁的控件直接跳过：中断会跳过后续重主题与 <<ThemeChanged>> 广播
             self._style_classic(widget, colors)
