@@ -18,12 +18,30 @@ py -m venv .venv
 
 ## 运行
 
+一键启动（推荐；双击 `NetGuard.bat` 或在命令行运行，会自动定位 Python 并转交
+`scripts/launch.py`，参数原样透传）：
+
+```powershell
+.\NetGuard.bat                 # 启动 GUI
+.\NetGuard.bat --list-devices  # 列出网卡
+.\NetGuard.bat --check         # 环境自检（Python/源码/抓包后端/界面/规则）
+.\NetGuard.bat --read capture.pcap
+```
+
+若本机尚未准备解释器，可让启动器自动建虚拟环境并安装：
+
+```powershell
+py scripts\launch.py --setup --no-run   # 创建 .venv + pip install -e .
+```
+
+直接使用 python 或已有启动脚本：
+
 ```powershell
 # 直接使用 python
 py main.py --list-devices
 py main.py
 
-# 或使用启动脚本（自动检测解释器）
+# 或使用启动脚本（自动检测解释器，最终转交 scripts\launch.py）
 .\scripts\run_netguard.ps1
 .\scripts\run_netguard.bat --list-devices
 

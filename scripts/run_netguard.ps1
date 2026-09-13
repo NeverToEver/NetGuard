@@ -67,5 +67,5 @@ if (-not $Python) {
     exit 1
 }
 
-& $Python (Join-Path $ProjectDir "main.py") @Args
+& $Python (Join-Path $ProjectDir "scripts\launch.py") @Args
 exit $LASTEXITCODE

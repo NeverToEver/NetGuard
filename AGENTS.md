@@ -41,6 +41,7 @@ src/netguard/
   gui/view_models.py        display formatting helpers
 tests/                      pytest suite (fakes/mocks; no libpcap, root, or display needed)
 scripts/                    unix + windows launchers, interpreter detection, app bundler, benchmark.py
+  launch.py                 cross-platform one-click entry (--check / --setup, forwards to main.py)
 docs/                       install/usage/technical/lab docs, benchmark.md (mostly Chinese)
 ```
 
@@ -63,6 +64,9 @@ python -m pip install -e .
 Run / test / benchmark:
 
 ```bash
+NetGuard.bat / ./NetGuard.sh                # one-click launcher (auto Python + self-check)
+NetGuard.bat --check                        # env self-check only (Python/source/capture/GUI/rules)
+python scripts/launch.py --setup --no-run   # create .venv + pip install -e .
 python main.py                              # GUI (default)
 python main.py --list-devices               # enumerate capture devices
 python main.py --no-gui --interface eth0 --bpf "tcp or udp"   # console preview
@@ -78,9 +82,18 @@ python scripts/benchmark.py --markdown      # perf + detection metrics
 finds the package without installing. Tests must not require libpcap, root, or a
 display — keep that property when adding tests.
 
-`scripts/run_netguard.sh` and `check_interpreter.sh` are POSIX only. On Windows use
-`scripts/run_netguard.ps1` / `.bat`, or invoke `python main.py` directly. Live capture
-needs elevation: `sudo` on Unix, an Administrator shell on Windows.
+`scripts/launch.py` is the single cross-platform entry behind `NetGuard.bat` /
+`NetGuard.sh` and `scripts/run_netguard.*`: it resolves the interpreter (repo `.venv`
+first), supports `--check` (env self-check) and `--setup` (create `.venv` +
+`pip install -e .`), and forwards every other arg to `main.py`. `scripts/run_netguard.sh`
+and `check_interpreter.sh` are POSIX only. On Windows use `NetGuard.bat` /
+`scripts/run_netguard.ps1`, or invoke `python main.py` directly. Live capture needs
+elevation: `sudo` on Unix, an Administrator shell on Windows.
+
+`.gitattributes` pins `*.bat`/`*.ps1` to CRLF and `*.sh` to LF — `.bat` files with LF
+line endings make cmd mis-parse `if (...)` blocks and hang. Keep batch files ASCII-only
+too: UTF-8 Chinese text plus a mid-file `chcp 65001` corrupts command parsing; let
+Python emit the localized messages.
 
 ## Conventions and architecture rules
 

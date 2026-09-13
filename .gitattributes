@@ -1,0 +1,16 @@
+# 默认按文本处理，仓库内统一 LF
+* text=auto
+
+# Windows 批处理与 PowerShell 必须 CRLF，否则 cmd 解析 if(...) 块会错乱/挂起
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+
+# POSIX shell 脚本必须 LF
+*.sh text eol=lf
+
+# 二进制资源不做行尾转换
+*.png binary
+*.svg text eol=lf
+*.icns binary
+*.pcap binary

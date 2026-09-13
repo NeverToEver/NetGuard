@@ -131,7 +131,33 @@ python main.py --read capture.pcap --rules my.rules --alerts-json alerts.json
 python scripts/benchmark.py --markdown
 ```
 
-启动脚本（自动检测解释器）：
+## 一键启动
+
+仓库根目录提供了一键启动脚本，会自动定位 Python 3.11+ 解释器（优先 `.venv`）并完成环境自检：
+
+```bash
+# Windows：双击 NetGuard.bat，或在命令行运行
+NetGuard.bat                 # 启动 GUI
+NetGuard.bat --list-devices  # 列出网卡
+NetGuard.bat --check         # 仅做环境自检
+NetGuard.bat --read capture.pcap
+
+# Linux / macOS
+./NetGuard.sh                # 启动 GUI
+./NetGuard.sh --check
+```
+
+所有参数原样转发给 `main.py`。若本机没有 Python 3.11+，可用 `--setup` 自动创建 `.venv` 并安装：
+
+```bash
+python scripts/launch.py --setup          # 建 .venv + pip install -e .，然后启动
+python scripts/launch.py --setup --no-run  # 只建环境，不启动
+```
+
+`--check` 会逐项报告 Python 版本、源码结构、包导入、抓包后端、图形界面、IDS 规则是否正常，
+适合在换机/排障时先跑一遍。
+
+启动脚本（自动检测解释器，最终都转交 `scripts/launch.py`）：
 
 ```bash
 ./scripts/run_netguard.sh            # Linux / macOS

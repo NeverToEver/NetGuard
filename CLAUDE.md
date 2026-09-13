@@ -5,9 +5,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Development Commands
 
 ```bash
-# First-time setup
+# First-time setup (or let the launcher do it: python scripts/launch.py --setup --no-run)
 /opt/homebrew/bin/python3.12 -m venv .venv
 ./.venv/bin/python -m pip install -e .
+
+# One-click launch + environment self-check (Windows: NetGuard.bat)
+./NetGuard.sh
+./NetGuard.sh --check
 
 # Run the app (GUI mode by default)
 ./scripts/run_netguard.sh
