@@ -379,6 +379,14 @@ class NetGuardApp(tk.Tk):
         if mode == "system":
             self._start_system_theme_poll()
 
+    def _toggle_night_mode(self) -> None:
+        """工具栏「夜间模式」开关：把勾选状态固化为 light/dark。
+
+        不能直接绑 _apply_theme —— 它按 theme_mode 重新推导暗色并覆盖 dark_mode，
+        复选框状态会被立刻还原，开关看起来失效。这里显式写入 theme_mode 才会生效。
+        """
+        self._set_theme_mode("dark" if self.dark_mode.get() else "light")
+
     def _start_system_theme_poll(self) -> None:
         """启动系统主题轮询；用哨兵防止重复启动叠加多条轮询链。"""
         if getattr(self, "_system_theme_poll_active", False):
@@ -525,7 +533,7 @@ class NetGuardApp(tk.Tk):
             row=1, column=2, sticky=tk.EW, padx=(0, 6), pady=(6, 0))
         self.export_alerts_btn = ttk.Button(actions, text="导出告警", width=10, style="Secondary.TButton", command=self._export_alerts)
         self.export_alerts_btn.grid(row=1, column=3, sticky=tk.EW, padx=(0, 6), pady=(6, 0))
-        ttk.Checkbutton(actions, text="夜间模式", variable=self.dark_mode, style="Switch.TCheckbutton", command=self._apply_theme).grid(
+        ttk.Checkbutton(actions, text="夜间模式", variable=self.dark_mode, style="Switch.TCheckbutton", command=self._toggle_night_mode).grid(
             row=1, column=4, sticky=tk.W, padx=(0, 6), pady=(6, 0))
         ttk.Button(actions, text="退出", width=8, style="Danger.TButton", command=self._exit).grid(
             row=1, column=5, sticky=tk.EW, pady=(6, 0))

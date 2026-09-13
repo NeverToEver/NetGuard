@@ -65,6 +65,22 @@ def test_theme_switching_updates_dark_flag(app) -> None:
     app._set_theme_mode("system")
 
 
+def test_night_mode_toggle_overrides_system(app) -> None:
+    """工具栏「夜间模式」开关必须真正改变主题，而不是被 _apply_theme 还原。"""
+    app._set_theme_mode("system")
+    app.dark_mode.set(False)
+    app._toggle_night_mode()
+    assert app.theme_mode.get() == "light"
+    assert app.dark_mode.get() is False
+
+    app.dark_mode.set(True)
+    app._toggle_night_mode()
+    assert app.theme_mode.get() == "dark"
+    assert app.dark_mode.get() is True
+
+    app._set_theme_mode("system")
+
+
 def test_sort_toggles_direction(app) -> None:
     app._sort("time")
     assert app._sort_column == "time"
