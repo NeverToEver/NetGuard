@@ -160,18 +160,48 @@ def ping_sweep(
     return alive
 
 
+def _looks_multibyte(encoding: str) -> bool:
+    """探测编码是否为多字节：多字节 CJK 编码会把 0x81 0x40 解成单个字符。
+
+    单字节编码（cp1252/latin-1 等）做不到——要么解出两个字符，要么直接报错。
+    """
+    try:
+        return len(b"\x81\x40".decode(encoding)) == 1
+    except (UnicodeDecodeError, LookupError, TypeError):
+        return False
+
+
+def _decoding_order() -> list[str]:
+    """给出“先严格多字节、后宽松单字节”的候选编码顺序。
+
+    Windows 子进程输出多为本地代码页：中文是 cp936(GBK)、日文 cp932 等多字节
+    编码，而西文 cp1252/latin-1 是单字节编码。单字节编码几乎能“成功”解码任意
+    字节，若排在 GBK 之前就会把 GBK 字节静默解成乱码，令 GBK 永远轮不到，因此
+    这里让多字节的本地编码优先、GBK 其次，单字节本地编码与 latin-1 仅作兜底。
+    """
+    preferred = locale.getpreferredencoding(False)
+    order = ["utf-8"]
+    if preferred and _looks_multibyte(preferred):
+        order.append(preferred)
+    order.append("gbk")
+    if preferred:
+        order.append(preferred)
+    order.append("latin-1")
+    return order
+
+
 def _decode_output(data: bytes | None) -> str:
     """把子进程原始输出解码为文本。
 
     Windows 上 ipconfig 等命令常按本地代码页（如中文 GBK/cp936）输出，若强制
     UTF-8 解码会抛 UnicodeDecodeError 并让 stdout 变成 None。这里按 UTF-8 →
-    当地首选编码 → GBK → latin-1 的顺序尝试，最后以 replace 兜底，保证不崩。
+    （多字节的）本地首选编码 → GBK → 单字节本地编码 → latin-1 的顺序尝试，最后
+    以 replace 兜底，保证不崩。
     """
     if not data:
         return ""
-    encodings = ["utf-8", locale.getpreferredencoding(False), "gbk", "latin-1"]
     seen: set[str] = set()
-    for encoding in encodings:
+    for encoding in _decoding_order():
         if not encoding or encoding.lower() in seen:
             continue
         seen.add(encoding.lower())
