@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import queue
 import time
 
 import pytest
@@ -31,7 +32,38 @@ def _get_app():
     _app.withdraw()
     _app.update_idletasks()
     _app.update()
+    _settle_background(_app)
     return _app
+
+
+def _settle_background(application, settle: float = 0.35, timeout: float = 3.0) -> None:
+    """排空构造期遗留的后台任务（如 _load_devices），建立干净的忙碌基线。
+
+    单例窗口在启动时用 after(100, _load_devices) 排定了设备加载任务；它会在
+    后续任意一次 update() 里触发，其后台线程与 busy 计数跨用例残留，令后续
+    用例的 busy 断言读到别的任务的文本。这里先跑满一个覆盖该定时器的时长让
+    它触发，再等到忙碌计数归零。只在首次建窗后调用一次即可。
+    """
+    deadline = time.monotonic() + timeout
+    settle_until = time.monotonic() + settle
+    while time.monotonic() < deadline:
+        application._pump_background()
+        try:
+            application.update_idletasks()
+            application.update()
+        except tk.TclError:
+            break
+        if time.monotonic() >= settle_until and application._busy_count <= 0:
+            break
+        time.sleep(0.01)
+    _reset_background(application)
+
+
+def _reset_background(application) -> None:
+    """把忙碌状态清回干净基线。"""
+    application._busy_count = 0
+    application._background_queue = queue.Queue()
+    application.busy_text_var.set("")
 
 
 @pytest.fixture()
@@ -39,6 +71,7 @@ def app():
     application = _get_app()
     if application is None:
         pytest.skip(_skip_reason)
+    _reset_background(application)
     # 每测重置可变状态，避免用例间互相污染
     application.events = []
     application.filtered = []
