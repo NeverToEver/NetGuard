@@ -243,7 +243,16 @@ def eval_false_positives(normal_bytes: list[bytes]) -> dict:
     }
 
 
+def _reconfigure_streams() -> None:
+    """Windows 控制台重定向到管道时是 ANSI 代码页（如 cp1252），中文输出会抛
+    UnicodeEncodeError；放宽编码避免基准报告本身中断。"""
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
+
+
 def main() -> int:
+    _reconfigure_streams()
     parser = argparse.ArgumentParser(description="NetGuard benchmark")
     parser.add_argument("--packets", type=int, default=100_000, help="解析/流水线基准的包数量")
     parser.add_argument("--rules", type=int, default=200, help="规则匹配基准加载的规则条数")
