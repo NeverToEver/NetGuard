@@ -66,6 +66,27 @@ def _reset_background(application) -> None:
     application.busy_text_var.set("")
 
 
+@pytest.fixture(autouse=True)
+def _silence_dialogs(monkeypatch):
+    """把 messagebox 换成非阻塞空实现。
+
+    无 Npcap 的 CI runner 上，启动时的网卡枚举会抛 PcapError，后台任务把它
+    作为错误回传，`_pump_background` 随即调用 `messagebox.showerror`。那是个
+    模态框，无人值守时永久阻塞，测试进程挂死。这里统一替换掉，避免触碰任何
+    真实对话框。
+    """
+    from netguard.gui import main_ui
+
+    def _noop(*_args, **_kwargs):
+        return None
+
+    for name in ("showerror", "showwarning", "showinfo"):
+        monkeypatch.setattr(main_ui.messagebox, name, _noop)
+    for name in ("askyesno", "askokcancel", "askquestion"):
+        monkeypatch.setattr(main_ui.messagebox, name, lambda *a, **k: False)
+    yield
+
+
 @pytest.fixture()
 def app():
     application = _get_app()
