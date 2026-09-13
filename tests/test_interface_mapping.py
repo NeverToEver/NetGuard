@@ -102,6 +102,24 @@ def test_decode_output_handles_gbk_windows_ipconfig() -> None:
     assert "子网掩码" in text
 
 
+def test_decode_output_prefers_gbk_over_single_byte_locale(monkeypatch) -> None:
+    """首选编码是单字节（如 CI 的 cp1252）时，GBK 字节不能被静默解成乱码。
+
+    单字节编码几乎能“成功”解码任意字节，若排在 GBK 之前，GBK 输出会被解成
+    乱码且永远轮不到 GBK——这正是 GitHub Actions 西文 Windows runner 上的
+    真实失败。
+    """
+    from netguard.discovery import subnet
+
+    monkeypatch.setattr(subnet.locale, "getpreferredencoding", lambda *a, **k: "cp1252")
+    gbk_bytes = "Windows IP 配置\r\n子网掩码".encode("gbk")
+    text = subnet._decode_output(gbk_bytes)
+    assert "Windows IP 配置" in text
+    assert "子网掩码" in text
+    # 真正的 cp1252 输出仍应正确还原
+    assert subnet._decode_output("café".encode("cp1252")) == "café"
+
+
 def test_decode_output_handles_empty_and_invalid() -> None:
     from netguard.discovery.subnet import _decode_output
 
