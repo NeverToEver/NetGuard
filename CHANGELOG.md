@@ -7,34 +7,22 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-16
+
+本轮主题是**工程化正式化**：不改动业务逻辑，补齐项目级工程配置、质量门槛、
+CI 与发布流程，修正文档中长期存在的相互矛盾，并把示例数据转为可复现的正式资产。
+
 ### Added
 
 - `docs/samples/sample.pcap` 与生成脚本 `scripts/build_sample_pcap.py`：可复现的
   离线演示样本，含正常流量、端口扫描、SYN flood 与畸形包四个场景。
 - `docs/troubleshooting.md`：抓包、显示、检测、运行环境的排障指南。
-- `tests/test_sample_pcap.py`：校验样本可复现、可解析，且确实触发文档承诺的检出。
+- `tests/test_sample_pcap.py`：校验样本可复现、可解析，确实触发文档承诺的检出，
+  并强制已提交样本与当前脚本产物字节一致（防样本漂移）。
 - `netguard.trafficgen` 公开底层构造器（`build_ethernet` / `build_ipv4` /
   `build_tcp` / `build_udp` / `build_dns_query` / `build_dns_response`）与
   `__all__`，供样本生成与基准复用。
 - README 新增「使用边界」章节，说明授权范围与敏感数据处理要求。
-
-### Changed
-
-- `scripts/benchmark.py` 改用 `trafficgen` 的公开构造器，删除约 40 行重复手写的
-  原始包字节拼接。
-- 示例样本生成从一次性临时脚本转为受测试保护的正式脚本。
-
-### Removed
-
-- `docs/lab-demo.md`、`docs/experiment-workflow.md`（课堂演示稿与实验验收流程）。
-  其中的排障内容整理进 `docs/troubleshooting.md`，授权说明并入 README。
-
-## [0.2.0] - 2026-09-16
-
-本轮主题是**工程化正式化**：不改动业务逻辑，补齐项目级工程配置、质量门槛、
-CI 与发布流程，并修正文档中长期存在的相互矛盾。
-
-### Added
 
 - 工程配置：`pyproject.toml` 补 `license` / `authors` / `keywords` /
   `classifiers` / `[project.urls]` / `[project.scripts]`，新增 `dev` 依赖组。
@@ -68,9 +56,16 @@ CI 与发布流程，并修正文档中长期存在的相互矛盾。
 - `.vscode` 配置改为跨平台（原 `settings.json` 写死 Unix 解释器路径、
   `tasks.json` 调用 POSIX-only 脚本，在 Windows 上必然失败）。
 - 文档语言：保持中文，补齐 README 徽章、mermaid 数据流图与界面截图。
+- `scripts/benchmark.py` 改用 `trafficgen` 的公开构造器，删除约 40 行重复手写的
+  原始包字节拼接；示例样本生成从一次性临时脚本转为受测试保护的正式脚本。
 
 ### Fixed
 
+- **告警列表非空时切换主题崩溃**：`_refresh_alert_colors` 用
+  `Listbox.get(index, index)`（双参数返回元组）喂给 `severity_color`，
+  触发 `AttributeError` 并中断主题切换。已修并补回归用例。
+- **`pip install -e .` 失败**：pyproject 同时声明 PEP 639 license 表达式与旧式
+  `License :: OSI Approved :: MIT License` 分类器，setuptools 拒绝该组合。
 - `rules/engine.py`：`rule` 变量先作 `str` 后作 `Rule` 复用造成遮蔽。
 - `capture/source.py`：`enqueue_raw` 带关键字参数与返回值，签名与
   `capture_loop` 回调约定不符，已修正回调类型声明。
@@ -78,6 +73,8 @@ CI 与发布流程，并修正文档中长期存在的相互矛盾。
 
 ### Removed
 
+- `docs/lab-demo.md`、`docs/experiment-workflow.md`（课堂演示稿与实验验收流程）。
+  排障内容整理进 `docs/troubleshooting.md`，授权说明并入 README。
 - `docs/更新说明.md`（孤立文档，内容并入本文件）。
 - `scripts/check_interpreter.sh`（功能由 `python scripts/launch.py --check` 覆盖）。
 
