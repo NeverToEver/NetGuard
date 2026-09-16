@@ -6,13 +6,48 @@ on:
   pull_request:
 
 jobs:
+  lint:
+    name: lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: python -m pip install --upgrade pip ruff
+
+      - name: Ruff check
+        run: python -m ruff check src tests scripts main.py
+
+      - name: Ruff format check
+        run: python -m ruff format --check src tests scripts main.py
+
+  typecheck:
+    name: typecheck (mypy strict)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install mypy
+        run: python -m pip install --upgrade pip mypy
+
+      - name: Mypy
+        run: python -m mypy
+
   pytest:
     name: ${{ matrix.os }} / Python ${{ matrix.python }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
         python: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v5
@@ -32,19 +67,32 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[test]"
 
-      - name: Run tests
-        run: python -m pytest tests/ -v
+      - name: Run tests with coverage
+        run: python -m pytest tests/ -v --cov=netguard --cov-report=term-missing --cov-report=xml
 
-      - name: Run benchmark (smoke)
-        run: python scripts/benchmark.py --packets 20000 --rules 50
+      - name: Upload coverage artifact
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.11'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
 
-  lint:
-    name: syntax check
+  benchmark:
+    name: benchmark smoke
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
-      - name: Compile all sources
-        run: python -m compileall -q src tests scripts
+          python-version: "3.11"
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]"
+
+      # --fail-on-miss 让检出率与误报率成为门槛：脚本内已实现但此前 CI 未启用，
+      # 等于检测质量无回归保护
+      - name: Run benchmark gate
+        run: python scripts/benchmark.py --packets 20000 --rules 50 --fail-on-miss
