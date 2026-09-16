@@ -127,7 +127,9 @@ Npcap Loopback Adapter
 alert tcp any any -> any 80 (content "GET"; msg "检测到 HTTP GET 请求";)
 ```
 
-规则引擎支持协议、端口、内容匹配和告警消息。其定位是教学和实验室演示，适合展示 IDS 的基础匹配流程，不等同于完整 Snort/Suricata 规则引擎。
+规则引擎支持协议、端口、内容匹配和告警消息，覆盖 IDS 的基础匹配流程；相比完整
+的 Snort/Suricata 规则引擎，尚未实现 `offset`/`depth`/`flags`/`threshold`/`sid`
+等选项与多包状态机，能力边界见 [roadmap.md](roadmap.md) A 组。
 
 ## 8. 图形界面设计
 

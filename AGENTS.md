@@ -150,7 +150,7 @@ Python emit the localized messages.
 - `docs/technical-report.md` — design details.
 - `docs/roadmap.md` — remaining/planned work and explicitly out-of-scope items (TLS, IPv6).
 - `docs/benchmark.md` — measured throughput/latency/detection numbers and known limits.
-- `docs/experiment-workflow.md`, `docs/lab-demo.md` — expected demo behavior.
+- `docs/troubleshooting.md` — FAQ for capture/display/detection/environment issues.
 - `docs/reviews/` — historical code reviews; note some P2 items are now addressed
   (pipeline split, GUI facade, stream matching, detectors).
 - `CONTRIBUTING.md` — dev setup, quality gates (ruff / mypy / coverage), commit rules.

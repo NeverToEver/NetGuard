@@ -307,8 +307,20 @@ python3 scripts/build_unix_app.py --python-env .venv
 - [后续工作路线图](docs/roadmap.md)
 - [贡献指南](CONTRIBUTING.md) · [变更记录](CHANGELOG.md)
 - 安装：[Linux](docs/install-linux.md) · [macOS](docs/install-macos.md) · [Windows](docs/install-windows.md)
-- 实验与演示：[实验流程](docs/experiment-workflow.md) · [实验室演示](docs/lab-demo.md)
+- 排查问题：[排障指南](docs/troubleshooting.md)
 - 分发与评审：[Linux 可执行文件分发](docs/distribute-linux.md) · [历次代码审查](docs/reviews/)
+
+## 使用边界
+
+NetGuard 是网络诊断与安全分析工具，**只应在你拥有权限的设备、授权网段或自有测试环境中使用**。
+抓包会捕获网络中的原始流量，可能包含账号、Token、内网地址与业务内容；未经授权监听他人网络或
+设备在多数司法辖区属违法行为。
+
+- 只监听授权网卡与授权网段，不要抓取公共网络或他人设备流量；
+- 导出的 pcap 与告警日志属敏感数据，提交或分享前请人工检查；
+- 仓库不应包含真实抓包文件、密钥或凭据。
+
+进一步说明见 [技术报告 · 安全与使用边界](docs/technical-report.md#10-安全与使用边界)。
 
 ## License
 

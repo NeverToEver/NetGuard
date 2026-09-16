@@ -16,8 +16,7 @@ NetGuard 的文档按用途分组。项目总览与架构见仓库根目录的
 | 文档 | 内容 |
 | --- | --- |
 | [usage.md](usage.md) | 界面区域、表格操作、快捷键、过滤、规则与检测器 |
-| [lab-demo.md](lab-demo.md) | 课堂演示脚本：每个界面动作对应的源码模块 |
-| [experiment-workflow.md](experiment-workflow.md) | 实验流程：从构造流量到验证检出 |
+| [troubleshooting.md](troubleshooting.md) | 常见问题与定位方法（抓包、显示、检测、运行环境） |
 
 ## 技术
 
@@ -26,6 +25,7 @@ NetGuard 的文档按用途分组。项目总览与架构见仓库根目录的
 | [technical-report.md](technical-report.md) | 分层架构、pcap 后端、解析器、规则引擎、GUI、测试、安全边界 |
 | [benchmark.md](benchmark.md) | 基准方法、测试环境、吞吐/延迟/检出结果与已知限制 |
 | [benchmark-results.json](benchmark-results.json) | `scripts/benchmark.py` 的原始输出（与 README 性能表同源） |
+| [samples/sample.pcap](samples/sample.pcap) | 离线演示样本（由 `scripts/build_sample_pcap.py` 生成） |
 
 ## 规划与评审
 

@@ -7,6 +7,28 @@
 
 ## [Unreleased]
 
+### Added
+
+- `docs/samples/sample.pcap` 与生成脚本 `scripts/build_sample_pcap.py`：可复现的
+  离线演示样本，含正常流量、端口扫描、SYN flood 与畸形包四个场景。
+- `docs/troubleshooting.md`：抓包、显示、检测、运行环境的排障指南。
+- `tests/test_sample_pcap.py`：校验样本可复现、可解析，且确实触发文档承诺的检出。
+- `netguard.trafficgen` 公开底层构造器（`build_ethernet` / `build_ipv4` /
+  `build_tcp` / `build_udp` / `build_dns_query` / `build_dns_response`）与
+  `__all__`，供样本生成与基准复用。
+- README 新增「使用边界」章节，说明授权范围与敏感数据处理要求。
+
+### Changed
+
+- `scripts/benchmark.py` 改用 `trafficgen` 的公开构造器，删除约 40 行重复手写的
+  原始包字节拼接。
+- 示例样本生成从一次性临时脚本转为受测试保护的正式脚本。
+
+### Removed
+
+- `docs/lab-demo.md`、`docs/experiment-workflow.md`（课堂演示稿与实验验收流程）。
+  其中的排障内容整理进 `docs/troubleshooting.md`，授权说明并入 README。
+
 ## [0.2.0] - 2026-09-16
 
 本轮主题是**工程化正式化**：不改动业务逻辑，补齐项目级工程配置、质量门槛、
@@ -38,9 +60,9 @@ CI 与发布流程，并修正文档中长期存在的相互矛盾。
 - 8 处静默 `except Exception: pass` 改为 `contextlib.suppress` 或记录日志，
   保留"退出清理 / 进度回调不应抛错"的原意。
 - GUI 后台任务队列改为传递已绑定结果的零参回调，消除 6 处 `# type: ignore`。
-- 文档修正：`README.md` 性能数据与基准产物对齐；`technical-report.md` /
-  `experiment-workflow.md` 中关于已删除的 `dark_mode` / `_apply_theme` 的描述
-  更新为当前 `gui/theme.py` 的 `ThemeManager` + `theme_mode` 模型；
+- 文档修正：`README.md` 性能数据与基准产物对齐；`technical-report.md` 中关于
+  已删除的 `dark_mode` / `_apply_theme` 的描述更新为当前 `gui/theme.py` 的
+  `ThemeManager` + `theme_mode` 模型；
   `README.md` / `usage.md` 补齐 ICMP flood 与 BruteForce 检测器说明。
 - `审查报告/` 归入 `docs/reviews/`，统一仓库命名。
 - `.vscode` 配置改为跨平台（原 `settings.json` 写死 Unix 解释器路径、

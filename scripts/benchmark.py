@@ -40,7 +40,13 @@ from netguard.detection import (  # noqa: E402
 )
 from netguard.parser.packet import parse_packet  # noqa: E402
 from netguard.rules.engine import RuleEngine  # noqa: E402
-from netguard.trafficgen import TEMPLATES  # noqa: E402
+from netguard.trafficgen import (  # noqa: E402
+    TEMPLATES,
+    build_ethernet,
+    build_ipv4,
+    build_tcp,
+    build_udp,
+)
 
 
 class ManualClock:
@@ -173,16 +179,20 @@ def bench_rule_match(engine: RuleEngine, packet_bytes: list[bytes], repeats: int
 # --- 检测能力评估 ---------------------------------------------------------
 
 
+def _syn_packet(src_port: int, dst_port: int) -> bytes:
+    """构造一个 Ethernet/IPv4/TCP SYN 帧（复用 trafficgen 的公开构造器）。"""
+    return build_ethernet(build_ipv4(build_tcp(b"", src_port=src_port, dst_port=dst_port, flags=0x02)))
+
+
+def _dns_query_packet(payload: bytes) -> bytes:
+    """构造一个 Ethernet/IPv4/UDP/53 帧。"""
+    return build_ethernet(build_ipv4(build_udp(payload), proto=17))
+
+
 def eval_syn_flood() -> dict:
     clock = ManualClock()
     detector = SynFloodDetector(clock, window_seconds=5.0, threshold=100)
-    src_pkt = struct.pack("!HHIIHHHH", 40000, 80, 1, 0, (5 << 12) | 0x02, 1024, 0, 0)
-    raw = (
-        b"\xaa" * 12
-        + b"\x08\x00"
-        + struct.pack("!BBHHHBBH4s4s", 0x45, 0, 40, 1, 0, 64, 6, 0, b"\x0a\x00\x00\x01", b"\x0a\x00\x00\x02")
-        + src_pkt
-    )
+    raw = _syn_packet(40000, 80)
     detected = False
     for i in range(150):
         pkt = parse_packet(raw, timestamp=float(i) * 0.01)
@@ -197,14 +207,7 @@ def eval_port_scan() -> dict:
     detector = PortScanDetector(clock, window_seconds=10.0, threshold=20)
     detected = False
     for port in range(1, 40):
-        tcp = struct.pack("!HHIIHHHH", 40000 + port, port, 1, 0, (5 << 12) | 0x02, 1024, 0, 0)
-        raw = (
-            b"\xaa" * 12
-            + b"\x08\x00"
-            + struct.pack("!BBHHHBBH4s4s", 0x45, 0, 40, 1, 0, 64, 6, 0, b"\x0a\x00\x00\x01", b"\x0a\x00\x00\x02")
-            + tcp
-        )
-        pkt = parse_packet(raw, timestamp=float(port) * 0.01)
+        pkt = parse_packet(_syn_packet(40000 + port, port), timestamp=float(port) * 0.01)
         if detector.observe(pkt):
             detected = True
             break
@@ -218,19 +221,9 @@ def eval_dns_tunnel() -> dict:
     for i in range(60):
         label = os.urandom(24).hex()
         qname = f"{label}.tunnel.example.com"
-        parts = qname.split(".")
-        name = b"".join(bytes([len(p)]) + p.encode() for p in parts) + b"\x00"
+        name = b"".join(bytes([len(part)]) + part.encode() for part in qname.split(".")) + b"\x00"
         payload = struct.pack("!HHHHHH", i, 0x0100, 1, 0, 0, 0) + name + struct.pack("!HH", 1, 1)
-        udp = struct.pack("!HHHH", 53000, 53, 8 + len(payload), 0) + payload
-        raw = (
-            b"\xaa" * 12
-            + b"\x08\x00"
-            + struct.pack(
-                "!BBHHHBBH4s4s", 0x45, 0, 20 + len(udp), 1, 0, 64, 17, 0, b"\x0a\x00\x00\x01", b"\x0a\x00\x00\x02"
-            )
-            + udp
-        )
-        pkt = parse_packet(raw, timestamp=float(i) * 0.01)
+        pkt = parse_packet(_dns_query_packet(payload), timestamp=float(i) * 0.01)
         if detector.observe(pkt):
             detected = True
             break
