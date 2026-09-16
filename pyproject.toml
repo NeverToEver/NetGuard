@@ -18,7 +18,8 @@ classifiers = [
   "Intended Audience :: Developers",
   "Intended Audience :: Education",
   "Intended Audience :: System Administrators",
-  "License :: OSI Approved :: MIT License",
+  # 不再写 "License :: OSI Approved :: MIT License"：license 已用 PEP 639 表达式
+  # 声明，setuptools 会拒绝同时出现旧式 license 分类器
   "Operating System :: MacOS",
   "Operating System :: Microsoft :: Windows",
   "Operating System :: POSIX :: Linux",
