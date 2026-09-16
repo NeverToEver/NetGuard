@@ -155,6 +155,10 @@ Python emit the localized messages.
   it handles both byte orders and µs/ns magic. `iter_pcap_safe()` tolerates truncation.
 - GUI tests build `NetGuardApp` via `object.__new__` and hand-rolled fakes; when you add
   a widget or pipeline attribute the GUI touches, update `tests/test_gui_state.py` fakes too.
+- Pixel coordinates are not portable in GUI tests: the smoke harness keeps the window
+  withdrawn, and on Linux/Xvfb a `grid`-managed child then reports `winfo_x() == 0`
+  forever (Windows/macOS report the real position). Assert on structure — `grid_info()`
+  cells, requested sizes, column widths, font metrics — not on `winfo_x/y`.
 - Windows `ipconfig`/`nbtstat` output is not UTF-8 on localized systems (e.g. cp936);
   decode subprocess output via `discovery.subnet._decode_output`, never `text=True`.
 - Tk widget defaults inflate the window's requested size: `tk.Text` defaults to

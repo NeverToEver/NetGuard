@@ -317,22 +317,23 @@ def _right_edge(widget, root) -> int:
 
 
 def test_rail_separator_has_its_own_grid_column(app) -> None:
-    """操作轨与内容区之间的 1px 分隔线必须独占一列。
+    """操作轨、分隔线、内容区必须各占一个 grid 单元格。
 
-    回归：它与内容帧曾放在同一个 grid 单元格里，sticky=NS 让它停在格子中间，
-    后创建的内容帧整块盖住它，分隔线在界面上从未真正出现过。
+    回归：那条 1px 竖线曾与内容帧放在同一个单元格里，`sticky="ns"` 让它停在格子
+    中间，后创建的内容帧把它整块盖住，分隔线在界面上从未真正出现过。
+    这里断言「没有两个控件共用单元格」——这正是遮挡的成因。
+    不比较 winfo_x()：窗口是 withdraw 的，Linux/Xvfb 上被 grid 管理的子控件
+    会一直报 x=0（Windows 上则是真实坐标），跨平台不可靠。
     """
-    # 先让 grid 把三列摆完：布局未算完时 winfo_x() 还是 0（Linux/Xvfb 上实测会撞上）
-    _settle(app)
     shell = app._rail.master
-    columns = {child.grid_info().get("column") for child in shell.grid_slaves()}
-    assert columns == {0, 1, 2}, "操作轨 / 分隔线 / 内容区应当各占一列"
+    cells = [(child.grid_info().get("row"), child.grid_info().get("column")) for child in shell.grid_slaves()]
+    assert len(cells) == len(set(cells)), f"有控件共用了同一个 grid 单元格（会互相遮挡）：{cells}"
+    assert {column for _row, column in cells} == {0, 1, 2}, "操作轨 / 分隔线 / 内容区应当各占一列"
 
     separator = next(child for child in shell.grid_slaves() if child.grid_info().get("column") == 1)
+    assert separator.winfo_width() <= 2, "第 1 列应当是 1px 的分隔线"
     content = next(child for child in shell.grid_slaves() if child.grid_info().get("column") == 2)
-    assert separator.winfo_width() <= 2
-    # 内容区从分隔线右侧开始：同格时它的 x 会落在分隔线左边界上（被盖住的那个位置）
-    assert content.winfo_x() >= separator.winfo_x() + separator.winfo_width(), "内容区压在分隔线上"
+    assert content.winfo_width() > separator.winfo_width(), "内容区不该被压成和分隔线一样宽"
 
 
 def test_minimum_window_size_keeps_every_control_inside(app) -> None:
