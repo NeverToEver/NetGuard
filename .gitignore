@@ -1,6 +1,7 @@
 __pycache__/
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
 .venv/
 .venv-win/
 .venv-build/
@@ -13,4 +14,10 @@ tmp/
 ~$*.docx
 *.egg-info/
 .zcode/
+.agents/
+.codex/
 *.pcap.tmp
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
