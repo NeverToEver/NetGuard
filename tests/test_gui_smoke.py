@@ -322,6 +322,8 @@ def test_rail_separator_has_its_own_grid_column(app) -> None:
     回归：它与内容帧曾放在同一个 grid 单元格里，sticky=NS 让它停在格子中间，
     后创建的内容帧整块盖住它，分隔线在界面上从未真正出现过。
     """
+    # 先让 grid 把三列摆完：布局未算完时 winfo_x() 还是 0（Linux/Xvfb 上实测会撞上）
+    _settle(app)
     shell = app._rail.master
     columns = {child.grid_info().get("column") for child in shell.grid_slaves()}
     assert columns == {0, 1, 2}, "操作轨 / 分隔线 / 内容区应当各占一列"
@@ -329,8 +331,8 @@ def test_rail_separator_has_its_own_grid_column(app) -> None:
     separator = next(child for child in shell.grid_slaves() if child.grid_info().get("column") == 1)
     content = next(child for child in shell.grid_slaves() if child.grid_info().get("column") == 2)
     assert separator.winfo_width() <= 2
-    # 内容区紧跟在分隔线右侧，说明它没有被压在分隔线上
-    assert content.winfo_x() == separator.winfo_x() + separator.winfo_width()
+    # 内容区从分隔线右侧开始：同格时它的 x 会落在分隔线左边界上（被盖住的那个位置）
+    assert content.winfo_x() >= separator.winfo_x() + separator.winfo_width(), "内容区压在分隔线上"
 
 
 def test_minimum_window_size_keeps_every_control_inside(app) -> None:
@@ -430,7 +432,10 @@ def test_log_strip_keeps_last_message_fully_visible(app) -> None:
     _x, y, width, height = info[0], info[1], info[2], info[3]
     assert width > 0, "最后一条日志落在空行上（末尾多了换行）"
     assert y >= 0 and y + height <= app._log_text.winfo_height(), f"最后一条日志被裁切：y={y} h={height}"
-    assert app._log_text.winfo_height() <= app._theme.font_mono.metrics("linespace") + 2, "单行模式下文本域被拉伸成多行"
+    # 单行模式下文本域只能占一行的高度（容差留给各平台字体度量的差异；
+    # 修复前这里是 29px vs 行高 20px，多出的半行会露出上一条的下半截）
+    linespace = app._theme.font_mono.metrics("linespace")
+    assert app._log_text.winfo_height() <= linespace + 4, f"单行日志条被拉伸到 {app._log_text.winfo_height()}px"
 
 
 def test_sort_toggles_direction(app) -> None:
