@@ -117,6 +117,17 @@ def _reset_background(application) -> None:
     application.busy_text_var.set("")
 
 
+def _settle(application, rounds: int = 12) -> None:
+    """跑若干轮事件循环，让 after_idle 排定的布局回调真正执行完。"""
+    for _ in range(rounds):
+        try:
+            application.update_idletasks()
+            application.update()
+        except tk.TclError:
+            return
+        time.sleep(0.01)
+
+
 @pytest.fixture(autouse=True)
 def _silence_dialogs(monkeypatch):
     """把 messagebox 换成非阻塞空实现。
@@ -196,7 +207,6 @@ def test_theme_switch_with_existing_alert_rows(app) -> None:
             rule_id=rule_id,
         )
 
-    app.alerts_placeholder = False
     app.alerts.delete(*app.alerts.get_children())
     app._insert_alert_rows(
         [
@@ -216,7 +226,7 @@ def test_theme_switch_with_existing_alert_rows(app) -> None:
     assert app.alerts.item(rows[1], "tags")[0] == "medium"
 
     app.alerts.delete(*app.alerts.get_children())
-    app.alerts_placeholder = True
+    app._update_alert_tab_label()
     app._set_theme_mode("system")
 
 
@@ -256,20 +266,171 @@ def test_detail_and_hex_views_populate_on_selection(app) -> None:
     assert "47 45 54" in app.hex_view.get("1.0", "end")
 
 
-def test_night_mode_toggle_overrides_system(app) -> None:
-    """工具栏「夜间模式」开关必须真正改变主题，而不是被 _apply_theme 还原。"""
+def test_theme_button_cycles_through_all_modes(app) -> None:
+    """顶栏主题按钮在「跟随系统 → 浅色 → 深色」之间循环。
+
+    这是替代早期工具栏「夜间模式」复选框的入口：当时开关失效是因为复选框状态
+    被 _apply_theme 按 theme_mode 还原，所以这里守住「循环真的改变了 dark_mode」。
+    """
     app._set_theme_mode("system")
-    app.dark_mode.set(False)
-    app._toggle_night_mode()
+    app._cycle_theme_mode()
     assert app.theme_mode.get() == "light"
     assert app.dark_mode.get() is False
 
-    app.dark_mode.set(True)
-    app._toggle_night_mode()
+    app._cycle_theme_mode()
     assert app.theme_mode.get() == "dark"
     assert app.dark_mode.get() is True
 
-    app._set_theme_mode("system")
+    app._cycle_theme_mode()
+    assert app.theme_mode.get() == "system"
+
+
+def test_ctrl_o_in_text_widgets_opens_pcap(app, monkeypatch) -> None:
+    """回归：Text 控件里的 Ctrl+O 既要打开文件，又不能插入换行。
+
+    Tk 的 Text 类绑定把 Ctrl+O 绑成"插入换行"，控件级绑定先于类绑定执行。
+    此前只在控件级返回 "break"，结果连主窗口的打开动作一起被吃掉——按 Ctrl+O
+    什么都不发生；正确做法是先执行打开动作、再返回 "break"。
+    """
+    calls: list[int] = []
+    monkeypatch.setattr(app, "_open_pcap", lambda: calls.append(1))
+
+    for name, widget in (("规则编辑框", app.rules_text), ("十六进制视图", app.hex_view), ("日志条", app._log_text)):
+        assert widget.bind("<Control-o>"), f"{name}缺少 Ctrl+O 的控件级绑定，会与 Text 默认换行冲突"
+
+    assert app._open_pcap_from_text(None) == "break"
+    assert calls == [1]
+
+
+def _right_edge(widget, root) -> int:
+    """控件右边界相对主窗口左沿的像素位置。
+
+    窗口在测试里是 withdraw 的，winfo_rootx/ismapped 都不可靠，因此按父子链
+    累加 winfo_x（布局本身照常计算，只是不映射到屏幕）。
+    """
+    x = 0
+    node = widget
+    while node is not None and node is not root:
+        x += node.winfo_x()
+        node = node.master
+    return x + widget.winfo_width()
+
+
+def test_rail_separator_has_its_own_grid_column(app) -> None:
+    """操作轨与内容区之间的 1px 分隔线必须独占一列。
+
+    回归：它与内容帧曾放在同一个 grid 单元格里，sticky=NS 让它停在格子中间，
+    后创建的内容帧整块盖住它，分隔线在界面上从未真正出现过。
+    """
+    shell = app._rail.master
+    columns = {child.grid_info().get("column") for child in shell.grid_slaves()}
+    assert columns == {0, 1, 2}, "操作轨 / 分隔线 / 内容区应当各占一列"
+
+    separator = next(child for child in shell.grid_slaves() if child.grid_info().get("column") == 1)
+    content = next(child for child in shell.grid_slaves() if child.grid_info().get("column") == 2)
+    assert separator.winfo_width() <= 2
+    # 内容区紧跟在分隔线右侧，说明它没有被压在分隔线上
+    assert content.winfo_x() == separator.winfo_x() + separator.winfo_width()
+
+
+def test_minimum_window_size_keeps_every_control_inside(app) -> None:
+    """不变量：窗口缩到最小尺寸时，最右侧的控件仍要留在窗口内。
+
+    这是防回归的护栏而非既有缺陷的复现——把默认列宽或工具条控件加宽时，只要
+    请求宽度超过 min_width，grid/pack 就会把放不下的控件摆到窗口外（第 5 张
+    KPI 卡、工具条右侧的丢弃计数、显示过滤栏的模板按钮与匹配胶囊）。
+    """
+    original = app.geometry()
+    min_width, min_height = app.minsize()
+    try:
+        app.geometry(f"{min_width}x{min_height}")
+        _settle(app)
+        assert app.winfo_width() == min_width
+
+        for name, widget in (
+            ("第 5 张 KPI 卡（IDS 告警）", app._stat_cards["alerts"]),
+            ("丢弃/解析异常计数", app._drop_hint),
+            ("显示过滤模板按钮", app._match_chip),
+            ("检视面板", app.detail),
+        ):
+            assert widget is not None, name
+            overflow = _right_edge(widget, app) - min_width
+            assert overflow <= 0, f"{name} 超出窗口右边界 {overflow}px"
+    finally:
+        app.geometry(original)
+        _settle(app)
+
+
+def test_shrinking_window_keeps_inspector_usable(app) -> None:
+    """窗口变窄后分隔条要重新钳制，检视面板仍放得下「字段 + 值」两列。
+
+    回归：分隔条位置是绝对值（ttk.PanedWindow 不会随窗口变窄自动回退），
+    在宽窗口上定位后缩窄窗口，右侧窗格会被压成一条缝——实测最小尺寸下检视面板
+    只剩 272px，而「字段 + 值」两列需要 320px，值列整列被裁掉。
+    """
+    original = app.geometry()
+    min_width, min_height = app.minsize()
+    try:
+        app.geometry(f"{min_width + 480}x{min_height + 160}")
+        _settle(app)
+        app.geometry(f"{min_width}x{min_height}")
+        _settle(app)
+
+        span = app._main_panes.winfo_width()
+        sash = app._main_panes.sashpos(0)
+        tail_min = max(340, app._tail_pane_min(app._main_panes, horizontal=True))
+        assert sash <= span - tail_min, f"分隔条未随窗口回收：sash={sash} span={span}"
+        columns = int(app.detail.column("#0", "width")) + int(app.detail.column("value", "width"))
+        assert app.detail.winfo_width() >= columns, (
+            f"检视面板被压扁到 {app.detail.winfo_width()}px，两列需要 {columns}px"
+        )
+    finally:
+        app.geometry(original)
+        _settle(app)
+
+
+def test_empty_state_text_fits_detail_columns(app) -> None:
+    """空状态文字要放得进解析树的两列。
+
+    Treeview 单元格不换行，文字比列宽长就被截成半句（空状态是新用户看到的第一屏，
+    "尚未选中数据[包]" 这种断句很显眼）。这里用真实字体度量 + 默认列宽校验。
+    """
+    from netguard.gui.main_ui import _DEFAULT_DETAIL_COLUMNS
+
+    app.detail.column("#0", width=_DEFAULT_DETAIL_COLUMNS["#0"])
+    app.detail.column("value", width=_DEFAULT_DETAIL_COLUMNS["value"])
+    app._set_initial_empty_state()
+
+    font = app._theme.font_body
+    title = str(app.detail.item("__empty__", "text")).strip()
+    hint = str(app.detail.set("__empty_hint__", "value"))
+    assert title and hint
+    # #0 列要给层级缩进留位置
+    assert font.measure(title) + 24 <= int(app.detail.column("#0", "width")), title
+    assert font.measure(hint) <= int(app.detail.column("value", "width")), hint
+
+
+def test_log_strip_keeps_last_message_fully_visible(app) -> None:
+    """单行日志必须完整显示最新一条。
+
+    回归：日志以换行结尾时 Text 会多出一条空显示行，滚到底部看到的是那条空行，
+    最后一条日志被挤出可视区——表现为整条看不见，或只露出上半截（与上一条叠在一起）。
+    """
+    if app._log_expanded:  # 其他用例可能把日志条展开过
+        app._toggle_log()
+    app._log("第一条日志")
+    app._log("第二条日志：这是最后一条")
+    _settle(app)
+
+    # 末尾不能多出空行（空列表项），否则最后一条日志会被挤出可视区
+    lines = app._log_text.get("1.0", "end-1c").split("\n")
+    assert lines[-2:] == ["第一条日志", "第二条日志：这是最后一条"], lines[-3:]
+    info = app._log_text.dlineinfo("end-1c")
+    assert info is not None, "最后一条日志不在可视区内"
+    _x, y, width, height = info[0], info[1], info[2], info[3]
+    assert width > 0, "最后一条日志落在空行上（末尾多了换行）"
+    assert y >= 0 and y + height <= app._log_text.winfo_height(), f"最后一条日志被裁切：y={y} h={height}"
+    assert app._log_text.winfo_height() <= app._theme.font_mono.metrics("linespace") + 2, "单行模式下文本域被拉伸成多行"
 
 
 def test_sort_toggles_direction(app) -> None:

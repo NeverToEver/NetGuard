@@ -179,16 +179,13 @@ def fake_app(events: list[PacketEvent], *, paused: bool = False, display_filter:
     app.events = []
     app.filtered = []
     app.event_offset = 0
-    app.alert_packet_indices = []
     app.alerts = FakeTree()
-    app.alerts_placeholder = True
     app.table = FakeTree()
     app.detail = FakeTree()
     app.hex_view = FakeText()
     app.error_list = FakeTree()
     app.error_summary_var = FakeVar("解析问题 0 · 致命异常 0")
     app.display_filter = FakeVar(display_filter)
-    app.packet_count_var = FakeVar()
     app.device_var = FakeVar("dev")
     app.display_to_device = {"dev": "dev"}
     app.capturing = True
@@ -212,7 +209,6 @@ def fake_app(events: list[PacketEvent], *, paused: bool = False, display_filter:
     app._busy_count = 0
     app._background_queue = __import__("queue").Queue()
     app._themed = []
-    app._panels = []
     app._panel_headers = []
     app._stat_cards = {}
     app._stats_cells = {}
@@ -234,14 +230,19 @@ def fake_app(events: list[PacketEvent], *, paused: bool = False, display_filter:
     return app
 
 
+def alert_iids(app: NetGuardApp) -> list[str]:
+    """告警表当前行的 iid（形如 "{包索引}:{序号}"）。"""
+    return list(app.alerts.get_children())
+
+
 def test_alerts_are_recorded_when_display_filter_hides_packet() -> None:
     app = fake_app([packet_event()], display_filter="DNS")
 
     app._tick()
 
-    assert len(app.alerts.get_children()) == 1
-    assert app.alerts_placeholder is False
-    assert app.alert_packet_indices == [0]
+    iids = alert_iids(app)
+    assert len(iids) == 1
+    assert iids[0].split(":", 1)[0] == "0"
     assert app.table.get_children() == ()
 
 
@@ -252,18 +253,14 @@ def test_alerts_are_recorded_while_table_refresh_is_paused() -> None:
 
     # 暂停期间事件仍被累积，但不刷新界面、不写告警
     assert len(app.events) == 1
-    assert app.alerts_placeholder is True
-    assert app.alerts.get_children() == ()
-    assert app.alert_packet_indices == []
+    assert alert_iids(app) == []
     assert app.table.get_children() == ()
 
     # 恢复刷新时通过 _catch_up_paused_alerts 补录暂停期间的告警
     app.paused = False
     app._catch_up_paused_alerts()
 
-    assert app.alerts_placeholder is False
-    assert len(app.alerts.get_children()) == 1
-    assert app.alert_packet_indices == [0]
+    assert len(alert_iids(app)) == 1
 
 
 def test_alert_row_is_tagged_with_structured_severity() -> None:
@@ -287,6 +284,46 @@ def test_alert_row_iid_encodes_packet_index_for_jump() -> None:
     iids = app.alerts.get_children()
     assert [int(iid.split(":", 1)[0]) for iid in iids] == [0, 1]
     assert len(set(iids)) == 2  # 同一包多条告警也不会撞 iid
+
+
+def test_clearing_resets_alert_tab_counter() -> None:
+    """回归：清空数据必须同时把标签页计数归零。
+
+    计数只在插入告警时刷新过，清空后表已经空了而标题还写着「告警（N）」，
+    用户会以为数据没清干净。
+    """
+    app = fake_app([packet_event(), packet_event()])
+    app._tick()
+    assert app._bottom_tabs.labels[0] == "告警（2）"
+
+    app._clear_capture_data()
+
+    assert alert_iids(app) == []
+    assert app._bottom_tabs.labels[0] == "告警"
+    assert app._bottom_tabs.labels[1] == "解析问题"
+
+
+def test_alert_insert_does_not_rescan_the_table_per_row() -> None:
+    """斑马纹的奇偶只取一次行数：每插一行都 get_children() 是 O(n²) 的 Tcl 往返。"""
+    app = fake_app([])
+    calls = {"count": 0}
+    original = app.alerts.get_children
+
+    def counting_get_children(item: str | None = None) -> tuple[str, ...]:
+        calls["count"] += 1
+        return original(item)
+
+    app.alerts.get_children = counting_get_children  # type: ignore[method-assign]
+    rows = [(idx, packet_event().alerts[0]) for idx in range(120)]
+    app._insert_alert_rows(rows)
+    scans = calls["count"]
+
+    assert len(alert_iids(app)) == 120
+    # 插入过程本身的扫描次数应与行数无关（另有常数次用于取末行与计数）
+    assert scans <= 5, f"逐行重扫告警表：{scans} 次 get_children()"
+    # 斑马纹仍然逐行交替
+    tags = [app.alerts.tags[iid][-1] for iid in app.alerts.get_children()]
+    assert tags == ["odd" if index % 2 == 0 else "even" for index in range(120)]
 
 
 def test_control_states_disable_stop_until_capturing() -> None:

@@ -79,11 +79,32 @@ TABLE_TRIM_CHUNK = 3000
 REFILTER_BATCH = 400
 SYSTEM_THEME_POLL_MS = 5000
 CONFIG_SAVE_DEBOUNCE_MS = 800
+#: 默认窗口尺寸与最小尺寸。最小尺寸必须容得下并排的两个面板的默认列宽之和
+#: （见 _DEFAULT_PACKET_COLUMNS / _DEFAULT_DETAIL_COLUMNS，有测试守住这条预算）。
+_DEFAULT_WINDOW_SIZE = (1600, 940)
+MIN_WINDOW_SIZE = (1280, 760)
+#: 数据包列表默认列宽：(宽度, 是否随窗口伸缩)
+_DEFAULT_PACKET_COLUMNS = {
+    "time": (110, False),
+    "src": (140, True),
+    "dst": (140, True),
+    "proto": (56, False),
+    "len": (52, False),
+    "summary": (202, True),
+}
+#: 检视面板解析树的默认列宽（"字段" 列要放得下空状态提示里的 6 个汉字 + 层级缩进）
+_DEFAULT_DETAIL_COLUMNS = {"#0": 132, "value": 200}
 #: 恢复分隔条位置的最大重试次数（等窗口完成首次布局）
 _SASH_RETRY_LIMIT = 12
+#: 各分隔条两侧的最小窗格尺寸（前导, 尾部）：恢复布局与窗口缩放共用同一套钳制，
+#: 尾部尺寸取该窗格"能正常显示内容"的请求尺寸（检视面板 340、底部标签页 150）。
+_SASH_MIN_SIZES = {"workspace": (160, 150), "main": (380, 340)}
 #: 流量统计页协议进度条的宽度与右侧留白列索引
 _STATS_BAR_WIDTH = 260
 _STATS_BAR_SPACER_COLUMN = 3
+
+#: 主题模式 → 日志文案（_cycle_theme_mode 用）
+_THEME_MODE_LABELS = {"system": "跟随系统", "light": "浅色", "dark": "深色"}
 
 #: 快捷键定义：(菜单标签, 加速键, Tk 事件序列)
 SHORTCUTS: list[tuple[str, str, str]] = [
@@ -320,10 +341,8 @@ class NetGuardApp(tk.Tk):
         self._rail_buttons: dict[str, ttk.Button] = {}
         self._rail_glyphs: dict[str, str] = {}
         self._rail_labels: dict[str, str] = {}
-        self._panels: list[tk.Frame] = []
         self._panel_headers: list[PanelHeader] = []
         self._stat_cards: dict[str, StatCard] = {}
-        self._body_frames: list[tk.Frame] = []
         self._stats_cells: dict[str, tk.Label] = {}
         self._proto_bars: dict[str, tuple[tk.Frame, tk.Frame, tk.Label]] = {}
         self._detail_nodes: dict[str, DetailNode] = {}
@@ -358,11 +377,7 @@ class NetGuardApp(tk.Tk):
         self._background_queue: queue.Queue[tuple[str, str | None, str | None, Callable[[], None] | None]] = (
             queue.Queue()
         )
-        self.packet_count_var = tk.StringVar(value="已显示 0 条")
-        self.alert_packet_indices: list[int] = []
-        self._error_packet_indices: list[int] = []
         self._last_error_refresh = 0.0
-        self.alerts_placeholder = False
         self._theme = ThemeManager(self)
         with suppress(tk.TclError):
             self._theme.theme_use("clam")
@@ -394,10 +409,10 @@ class NetGuardApp(tk.Tk):
             try:
                 self.geometry(geometry)
             except tk.TclError:
-                _set_initial_window_size(self, 1600, 940, 1280, 760)
+                _set_initial_window_size(self, *_DEFAULT_WINDOW_SIZE, *MIN_WINDOW_SIZE)
         else:
-            _set_initial_window_size(self, 1600, 940, 1280, 760)
-        self.minsize(1280, 760)
+            _set_initial_window_size(self, *_DEFAULT_WINDOW_SIZE, *MIN_WINDOW_SIZE)
+        self.minsize(*MIN_WINDOW_SIZE)
         if self._config.window.zoomed:
             try:
                 self.state("zoomed")
@@ -502,16 +517,14 @@ class NetGuardApp(tk.Tk):
         current = self.theme_mode.get()
         index = order.index(current) if current in order else 0
         self._set_theme_mode(order[(index + 1) % len(order)])
-        self._log(f"主题已切换为{ {'system': '跟随系统', 'light': '浅色', 'dark': '深色'}[self.theme_mode.get()] }")
+        self._log(f"主题已切换为{_THEME_MODE_LABELS[self.theme_mode.get()]}")
 
     def _refresh_alert_colors(self) -> None:
         """主题切换后重刷既有告警行前景色（per-row 颜色只在插入时设置过）。"""
-        if self.alerts_placeholder:
-            return
         for iid in self.alerts.get_children():
-            if iid not in self._alert_by_row:
+            alert = self._alert_by_row.get(iid)
+            if alert is None:
                 continue
-            alert = self._alert_by_row[iid]
             try:
                 self.alerts.item(iid, tags=(severity_key(alert),))
             except tk.TclError:
@@ -522,14 +535,6 @@ class NetGuardApp(tk.Tk):
         self._apply_theme()
         if mode == "system":
             self._start_system_theme_poll()
-
-    def _toggle_night_mode(self) -> None:
-        """工具栏「夜间模式」开关：把勾选状态固化为 light/dark。
-
-        不能直接绑 _apply_theme —— 它按 theme_mode 重新推导暗色并覆盖 dark_mode，
-        复选框状态会被立刻还原，开关看起来失效。这里显式写入 theme_mode 才会生效。
-        """
-        self._set_theme_mode("dark" if self.dark_mode.get() else "light")
 
     def _start_system_theme_poll(self) -> None:
         """启动系统主题轮询；用哨兵防止重复启动叠加多条轮询链。"""
@@ -623,7 +628,6 @@ class NetGuardApp(tk.Tk):
         body = tk.Frame(panel, borderwidth=0, highlightthickness=0)
         self._paint(body, background="surface")
         body.pack(fill=tk.BOTH, expand=True)
-        self._panels.append(panel)
         return panel, body
 
     def _build(self) -> None:
@@ -678,14 +682,15 @@ class NetGuardApp(tk.Tk):
         shell = tk.Frame(self, borderwidth=0, highlightthickness=0)
         self._paint(shell, background="canvas")
         shell.grid(row=1, column=0, sticky=tk.NSEW)
-        shell.columnconfigure(1, weight=1)
+        # 第 0 列是操作轨、第 1 列是 1px 分隔线（_build_rail 负责）、第 2 列是内容区
+        shell.columnconfigure(2, weight=1)
         shell.rowconfigure(0, weight=1)
 
         self._build_rail(shell)
 
         content = tk.Frame(shell, borderwidth=0, highlightthickness=0)
         self._paint(content, background="canvas")
-        content.grid(row=0, column=1, sticky=tk.NSEW)
+        content.grid(row=0, column=2, sticky=tk.NSEW)
         content.columnconfigure(0, weight=1)
         content.rowconfigure(3, weight=1)
         self._build_capture_bar(content)
@@ -697,9 +702,12 @@ class NetGuardApp(tk.Tk):
         """左侧操作轨：把最高频的动作从工具栏搬到固定的竖向位置。"""
         colors = build_colors(self.dark_mode.get())
         rail = tk.Frame(parent, width=62, borderwidth=0, highlightthickness=0)
+        self._rail = rail
         self._paint(rail, background="surface_2")
         rail.grid(row=0, column=0, sticky=tk.NS)
         rail.grid_propagate(False)
+        # 操作轨与内容区之间的 1px 分隔线：必须独占第 1 列，和内容区放在同一格里
+        # 会被后创建的内容帧整块盖住（sticky=NS 只纵向拉伸，横向停在单元格中间）
         self._paint(vline(parent, colors["border"]), background="border").grid(row=0, column=1, sticky=tk.NS)
 
         spec: list[tuple[str, str, str, str, str, Callable[[], None]] | None] = [
@@ -852,6 +860,10 @@ class NetGuardApp(tk.Tk):
         workspace.add(bottom, weight=3)
         self._workspace = workspace
         self._main_panes = main_area
+        # 窗格自身尺寸变化时就重算分隔条：窗口缩放、兄弟控件请求尺寸变化都会
+        # 让窗格变窄，若只在窗口 Configure 时重算，尾部窗格仍会被压扁
+        for name, pane in (("workspace", workspace), ("main", main_area)):
+            pane.bind("<Configure>", partial(self._on_pane_configure, name), add="+")
 
         self._build_packet_panel(main_area)
         self._build_inspector_panel(main_area)
@@ -874,17 +886,9 @@ class NetGuardApp(tk.Tk):
         }
         self.table = ttk.Treeview(body, columns=columns, show="headings", height=14)
         # 列宽预算：时间/协议/长度定宽，地址与摘要按比例伸缩。
-        # 详情面板现在与列表并排，两者列宽相加就是窗口的最小宽度，
-        # 所以这里必须收紧默认值，否则 1600 宽的窗口会直接把右侧内容裁掉。
-        layout = {
-            "time": (118, False),
-            "src": (158, True),
-            "dst": (158, True),
-            "proto": (58, False),
-            "len": (58, False),
-            "summary": (320, True),
-        }
-        for col, (width, stretch) in layout.items():
+        # 详情面板与数据包列表并排，两组默认列宽之和必须落在最小窗口（MIN_WINDOW_SIZE）
+        # 之内，否则最小尺寸下右侧内容会被推到窗口外（tests/test_gui_layout.py 守住）。
+        for col, (width, stretch) in _DEFAULT_PACKET_COLUMNS.items():
             self.table.heading(col, text=headings[col], command=partial(self._sort, col))
             self.table.column(col, width=width, minwidth=48, anchor=tk.W, stretch=stretch)
         self.table.column("len", anchor=tk.E)
@@ -913,7 +917,6 @@ class NetGuardApp(tk.Tk):
 
         notebook = ttk.Notebook(body, style="Card.TNotebook")
         notebook.grid(row=0, column=0, sticky=tk.NSEW)
-        self._inspector_tabs = notebook
 
         tree_frame = ttk.Frame(notebook, style="Surface.TFrame")
         tree_frame.rowconfigure(0, weight=1)
@@ -921,8 +924,10 @@ class NetGuardApp(tk.Tk):
         self.detail = ttk.Treeview(tree_frame, columns=("value",), show="tree headings", height=8)
         self.detail.heading("#0", text="字段", anchor=tk.W)
         self.detail.heading("value", text="值", anchor=tk.W)
-        self.detail.column("#0", width=150, minwidth=90, anchor=tk.W, stretch=False)
-        self.detail.column("value", width=240, minwidth=80, anchor=tk.W, stretch=True)
+        # 与数据包列表同理：这两列的默认宽度决定了检视面板的最小宽度，
+        # 必须让 MIN_WINDOW_SIZE 放得下（_SASH_MIN_SIZES 的尾部下限取 340）。
+        self.detail.column("#0", width=_DEFAULT_DETAIL_COLUMNS["#0"], minwidth=90, anchor=tk.W, stretch=False)
+        self.detail.column("value", width=_DEFAULT_DETAIL_COLUMNS["value"], minwidth=80, anchor=tk.W, stretch=True)
         detail_scroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.detail.yview)
         self.detail.configure(yscrollcommand=detail_scroll.set)
         self.detail.grid(row=0, column=0, sticky=tk.NSEW)
@@ -1160,7 +1165,9 @@ class NetGuardApp(tk.Tk):
             strip, height=1, width=1, wrap=tk.NONE, padx=0, pady=0, borderwidth=0, highlightthickness=0
         )
         self._classic_widgets.append(self._log_text)
-        self._log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # 单行模式下只占一行的高度（fill=X，不纵向拉伸）：30px 的栏比一行文字
+        # 高 9px，拉伸开就会露出上一行的下半截，看起来像两行文字叠在一起
+        self._log_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self._log_text.configure(state=tk.DISABLED)
 
         self._log_expand_btn = ttk.Button(strip, text="展开", width=5, style="Tiny.TButton", command=self._toggle_log)
@@ -1283,11 +1290,18 @@ class NetGuardApp(tk.Tk):
         }
         for sequence, callback in mapping.items():
             self.bind(sequence, partial(self._invoke_ignoring_event, callback))
-        # Tk Text 类绑定了 <Control-o>（自插入换行），与"打开 pcap"冲突：
-        # 在每个 Text 上拦截该序列，一次按键只触发主窗口动作
+        # Tk Text 类绑定了 <Control-o>（自插入换行），与「打开 pcap」冲突。
+        # 控件级绑定先于类绑定执行，这里直接执行打开动作并返回 "break"，
+        # 一次按键只打开文件、不再插入换行。注意不能只返回 "break"：那会连同
+        # 主窗口的绑定一起吃掉，快捷键看起来彻底失效。
         for text in (self._log_text, self.hex_view, self.rules_text):
             if text is not None:
-                text.bind("<Control-o>", lambda _event: "break")
+                text.bind("<Control-o>", self._open_pcap_from_text)
+
+    def _open_pcap_from_text(self, _event: tk.Event | None = None) -> str:
+        """Text 控件内的 Ctrl+O：执行打开动作并阻断 Tk 的默认换行插入。"""
+        self._open_pcap()
+        return "break"
 
     def _on_escape(self) -> None:
         # 焦点在输入框时 Esc 是取消/收起输入的惯例，不应弹"停止抓包"确认框
@@ -1560,9 +1574,10 @@ class NetGuardApp(tk.Tk):
         self._update_control_states()
 
     def _set_initial_empty_state(self) -> None:
-        self._show_empty_detail("尚未选中数据包", "在数据包列表中点选任意一行，这里会显示逐层协议字段。")
-        self._set_hex_message("尚未选中数据包", "选中后这里显示原始字节（十六进制 + ASCII）。")
-        self.alerts_placeholder = True
+        # 空状态的文字要短：解析树的两列是定宽（字段 120px / 值 200px），
+        # Treeview 单元格不会换行，长句子会被直接截断成半句
+        self._show_empty_detail("未选中数据包", "点选一行查看协议字段")
+        self._set_hex_message("未选中数据包", "点选数据包后这里显示原始字节（十六进制 + ASCII）。")
         if self._table_hint is not None:
             self._table_hint.configure(text="尚未捕获任何数据包 · 点击左侧「开始」或按 F5 启动")
 
@@ -1620,11 +1635,15 @@ class NetGuardApp(tk.Tk):
         if self._log_text is None:
             return
         self._log_text.configure(state=tk.NORMAL)
-        self._log_text.insert(tk.END, f"{msg}\n")
+        # 行间换行写在「下一条」之前，日志末尾不留换行：Text 末尾的换行会多出一条
+        # 空显示行，滚到底部时看到的是那条空行，最后一条日志反被挤到可视区之外
+        # （单行模式下表现为整条日志看不见，或只露出上半截）。
+        prefix = "" if self._log_text.index("end-1c") == "1.0" else "\n"
+        self._log_text.insert(tk.END, f"{prefix}{msg}")
         lines = int(self._log_text.index("end-1c").split(".")[0])
         if lines > 200:
             self._log_text.delete("1.0", f"{lines - 150}.0")
-        self._log_text.see("end-1c")
+        self._log_text.yview_moveto(1.0)
         self._log_text.configure(state=tk.DISABLED)
 
     def _toggle_log(self) -> None:
@@ -1634,9 +1653,11 @@ class NetGuardApp(tk.Tk):
             return
         self._log_strip.configure(height=30 if not self._log_expanded else 138)
         self._log_text.configure(height=1 if not self._log_expanded else 7)
+        # 展开时把文本域纵向铺满，收起时只占一行（多出来的高度会露出上一行）
+        self._log_text.pack_configure(fill=tk.BOTH if self._log_expanded else tk.X)
         if self._log_expand_btn is not None:
             self._log_expand_btn.configure(text="展开" if not self._log_expanded else "收起")
-        self._log_text.see("end-1c")
+        self._log_text.yview_moveto(1.0)
 
     def _update_indicator(self) -> None:
         colors = build_colors(self.dark_mode.get())
@@ -1656,7 +1677,8 @@ class NetGuardApp(tk.Tk):
             self._status_detail.configure(text=f"· {detail}")
 
     def _real_alert_count(self) -> int:
-        return 0 if self.alerts_placeholder else len(self.alerts.get_children())
+        """告警表里真实告警的行数（表头计数、KPI 卡与导出都以它为准）。"""
+        return len(self.alerts.get_children())
 
     def _selected_device_name(self) -> str:
         selected = self.device_var.get()
@@ -1785,6 +1807,7 @@ class NetGuardApp(tk.Tk):
                 f"应用 BPF 将清空当前抓包数据并使用新过滤条件重新开始。\n\n"
                 f"{detail}。\n\n"
                 f"建议先导出告警数据（导出告警按钮），是否继续更换？",
+                parent=self,
             ):
                 current = self._format_bpf_for_log(getattr(self, "_active_bpf_filter", ""))
                 self._log(f"已取消应用 BPF，当前抓包仍使用：{current}")
@@ -1865,19 +1888,17 @@ class NetGuardApp(tk.Tk):
         self.events.clear()
         self.event_offset = 0
         self.filtered.clear()
-        self.alert_packet_indices.clear()
-        self._error_packet_indices.clear()
         self._alert_by_row.clear()
         self._alert_seq = 0
         self._last_error_refresh = 0.0
         self._last_error_state = None
         self.table.delete(*self.table.get_children())
         self.alerts.delete(*self.alerts.get_children())
-        self.alerts_placeholder = False
-        self.error_list.delete(*self.error_list.get_children())
         self._clear_detail_tree()
         self._reset_stats_display()
         self._update_packet_count()
+        # 标签页标题带实时计数，清空后必须一起归零，否则会一直显示「告警（N）」
+        self._update_alert_tab_label()
         self._set_initial_empty_state()
 
     def _show_display_filter_templates(self) -> None:
@@ -1933,20 +1954,68 @@ class NetGuardApp(tk.Tk):
             saved = {}
         # 默认分割比例：数据包列表约占六成，底部标签页留三分之一。
         # 关键是用「窗格自身的尺寸」算，而不是窗口尺寸——否则底部会被挤成一条缝。
-        for name, pane, min_lead, min_tail in (
-            ("workspace", self._workspace, 160, 150),
-            ("main", self._main_panes, 380, 300),
-        ):
+        for name, pane in (("workspace", self._workspace), ("main", self._main_panes)):
             span = pane.winfo_height() if name == "workspace" else pane.winfo_width()
             if span <= 1:
                 continue
             positions = saved.get(name) or [int((span - 8) * 0.62)]
-            for index, pos in enumerate(positions):
-                clamped = max(min_lead, min(int(pos), span - min_tail))
-                try:
-                    pane.sashpos(index, clamped)
-                except (tk.TclError, IndexError):
-                    break
+            self._set_sash_positions(name, pane, positions)
+
+    def _set_sash_positions(self, name: str, pane: ttk.PanedWindow, positions: list[int]) -> None:
+        """钳制后写入分隔条位置：两侧窗格都要留够显示内容的最小尺寸。
+
+        ttk.PanedWindow 的分隔条位置是绝对值，窗口变窄时不会自动回退；不钳制的话
+        检视面板会被压成一条缝，值列（面板里唯一的内容）直接被裁掉。
+        尾部下限取「常量与尾部窗格请求尺寸中的较大者」，这样用户把检视面板的列拖宽
+        之后，缩窗口也不会把值列裁掉。
+        """
+        span = pane.winfo_height() if name == "workspace" else pane.winfo_width()
+        if span <= 1:
+            return
+        min_lead, min_tail = _SASH_MIN_SIZES[name]
+        min_tail = max(min_tail, self._tail_pane_min(pane, horizontal=name == "main"))
+        if span < min_lead + min_tail:
+            # 空间不足以同时满足两侧时均分，总比让一侧彻底塌掉好
+            min_lead = min_tail = span // 2
+        for index, pos in enumerate(positions):
+            clamped = max(min_lead, min(min(int(pos), span - min_tail), span - min_lead))
+            try:
+                if pane.sashpos(index) == clamped:
+                    # 已经是合法位置：不写回，避免无谓的重新布局（也避免回调自激）
+                    continue
+                pane.sashpos(index, clamped)
+            except (tk.TclError, IndexError):
+                break
+
+    def _tail_pane_min(self, pane: ttk.PanedWindow, *, horizontal: bool) -> int:
+        """尾部窗格的请求尺寸（内容决定的最小可用宽度/高度）；取不到时返回 0。"""
+        panes = pane.panes()
+        if len(panes) < 2:
+            return 0
+        try:
+            widget = self.nametowidget(panes[-1])
+        except tk.TclError:
+            return 0
+        size = widget.winfo_reqwidth() if horizontal else widget.winfo_reqheight()
+        return max(0, int(size))
+
+    def _on_pane_configure(self, name: str, _event: tk.Event | None = None) -> None:
+        """窗格尺寸变化后重新钳制分隔条。
+
+        每次事件都排一个空闲回调（不合并）：一次拖动会连发多个事件，而回调读的是
+        窗格「当时」的尺寸——只有最后那次读到的才是最终布局。
+        """
+        self.after_idle(partial(self._clamp_sash_now, name))
+
+    def _clamp_sash_now(self, name: str) -> None:
+        """只处理当前分隔条位置，不回到配置里的旧值——用户拖动过的位置要保留。"""
+        pane = self._workspace if name == "workspace" else self._main_panes
+        try:
+            positions = [pane.sashpos(index) for index in range(max(0, len(pane.panes()) - 1))]
+        except tk.TclError:
+            return
+        if positions:
+            self._set_sash_positions(name, pane, positions)
 
     def _apply_display_filter_template(self, value: str) -> None:
         self.display_filter.set(value)
@@ -2017,7 +2086,7 @@ class NetGuardApp(tk.Tk):
     def _stop(self) -> None:
         if not self.capturing:
             return
-        if not messagebox.askokcancel("停止抓包", "确定要停止抓包吗？"):
+        if not messagebox.askokcancel("停止抓包", "确定要停止抓包吗？", parent=self):
             return
         self.pipeline.stop()
         self.capturing = False
@@ -2093,7 +2162,6 @@ class NetGuardApp(tk.Tk):
     def _update_packet_count(self) -> None:
         shown = len(self.filtered)
         total = len(self.events)
-        self.packet_count_var.set(f"已显示 {shown} 条")
         if self._match_chip is not None:
             self._match_chip.configure(text=f"{shown:,} / {total:,} 条匹配")
         if self._table_hint is not None:
@@ -2150,15 +2218,15 @@ class NetGuardApp(tk.Tk):
     def _insert_alert_rows(self, rows: list[tuple[int, Alert]]) -> None:
         """把 (数据包全局索引, 告警) 追加进告警表。
 
+        行 iid 形如 ``"{数据包索引}:{序号}"``，双击定位时直接解析，无需额外映射表。
         表格按时间正序增长（最新在最下方），只有当用户本来就停在底部时才自动
         跟随滚动——否则正在翻看历史告警的人会被不断跳走。
         """
         if not rows:
             return
         follower = self._tree_at_bottom(self.alerts)
-        if self.alerts_placeholder:
-            self.alerts.delete(*self.alerts.get_children())
-            self.alerts_placeholder = False
+        # 斑马纹的奇偶从插入前的行数起算；get_children 是 Tcl 往返，不能每插一行调一次
+        parity = len(self.alerts.get_children())
         for packet_idx, alert in rows:
             self._alert_seq += 1
             iid = f"{packet_idx}:{self._alert_seq}"
@@ -2168,9 +2236,9 @@ class NetGuardApp(tk.Tk):
                 tk.END,
                 iid=iid,
                 values=alert_row(alert),
-                tags=(severity_key(alert), "even" if len(self.alerts.get_children()) % 2 else "odd"),
+                tags=(severity_key(alert), "even" if parity % 2 else "odd"),
             )
-            self.alert_packet_indices.append(packet_idx)
+            parity += 1
         if follower:
             last = self.alerts.get_children()
             if last:
@@ -2187,11 +2255,20 @@ class NetGuardApp(tk.Tk):
             return True
 
     def _update_alert_tab_label(self) -> None:
-        count = self._real_alert_count()
+        self._set_alert_tab_label(self._real_alert_count())
+
+    def _set_alert_tab_label(self, count: int) -> None:
+        """告警标签页标题带实时计数（0 时不显示括号）。"""
         if self._bottom_tabs is None:
             return
         with suppress(tk.TclError):
             self._bottom_tabs.tab(self._alert_tab_index, text=f"告警（{count}）" if count else "告警")
+
+    def _set_issue_tab_label(self, count: int) -> None:
+        if self._bottom_tabs is None:
+            return
+        with suppress(tk.TclError):
+            self._bottom_tabs.tab(self._issue_tab_index, text=f"解析问题（{count}）" if count else "解析问题")
 
     def _sort_alerts(self, col: str) -> None:
         """告警表按列排序；时间与级别按语义排序而非字典序。"""
@@ -2259,15 +2336,12 @@ class NetGuardApp(tk.Tk):
             self._log(f"表格已裁剪 {len(removed)} 行")
 
     def _trim_alerts(self) -> None:
-        if self.alerts_placeholder:
-            return
         extra = len(self.alerts.get_children()) - MAX_ALERT_ROWS
         if extra > 0:
             rows = self.alerts.get_children()
             for iid in rows[:extra]:
                 self._alert_by_row.pop(iid, None)
             self.alerts.delete(*rows[:extra])
-            del self.alert_packet_indices[:extra]
             self._log(f"告警已裁剪 {extra} 条")
 
     def _drop_oldest_events(self, trim_count: int) -> None:
@@ -2280,8 +2354,6 @@ class NetGuardApp(tk.Tk):
         del self.events[:trim_count]
         self.event_offset += trim_count
         self.filtered = [idx for idx in self.filtered if idx >= self.event_offset]
-        self.alert_packet_indices = [idx for idx in self.alert_packet_indices if idx >= self.event_offset]
-        self._error_packet_indices = [idx for idx in self._error_packet_indices if idx >= self.event_offset]
         if self._refilter_queue:
             self._refilter_queue = [idx for idx in self._refilter_queue if idx >= self.event_offset]
         rows_set = set(self.table.get_children())
@@ -2475,6 +2547,8 @@ class NetGuardApp(tk.Tk):
             count.configure(text="0")
         self.error_list.delete(*self.error_list.get_children())
         self.error_summary_var.set("解析问题 0 · 致命异常 0")
+        # 标签页计数与摘要同步归零，不依赖下一轮 _refresh_errors
+        self._set_issue_tab_label(0)
 
     def _refresh_stats(self) -> None:
         status = self.pipeline.status()
@@ -2551,15 +2625,9 @@ class NetGuardApp(tk.Tk):
                 values=(stamp, layer, message, endpoint),
                 tags=("problem", "even" if seq % 2 else "odd"),
             )
-        self._error_packet_indices = [item[4] for item in recent_issues]
+        self._set_issue_tab_label(issue_count)
         if self._error_badge is not None:
             self._error_badge.configure(text=f"解析异常 {parse_errs}" if parse_errs else "")
-        if self._bottom_tabs is None:
-            return
-        with suppress(tk.TclError):
-            self._bottom_tabs.tab(
-                self._issue_tab_index, text=f"解析问题（{issue_count}）" if issue_count else "解析问题"
-            )
 
     def _export_alerts(self) -> None:
         if self._real_alert_count() == 0:
@@ -2573,9 +2641,13 @@ class NetGuardApp(tk.Tk):
         if not path:
             return
         is_json = path.lower().endswith(".json")
-        # 在主线程快照数据，后台只做文件写入，避免触碰 Tk 控件
-        records = [alert.to_dict() for event in self.events for alert in event.alerts]
-        lines = [alert_detail_text(self._alert_by_row[iid]).replace("\n", " · ") for iid in self.alerts.get_children()]
+        # 在主线程快照数据，后台只做文件写入，避免触碰 Tk 控件。
+        # 两种格式都从同一份快照（self.events 里的全部告警）导出：改从告警表取
+        # 文本行会让 JSON 与文本的条数不一致（表格有 MAX_ALERT_ROWS 上限，
+        # 而且被裁剪/排序过的行并不等于全部告警）。
+        alerts = [alert for event in self.events for alert in event.alerts]
+        records = [alert.to_dict() for alert in alerts]
+        lines = [alert_detail_text(alert).replace("\n", " · ") for alert in alerts]
 
         def work() -> int:
             with open(path, "w", encoding="utf-8") as handle:

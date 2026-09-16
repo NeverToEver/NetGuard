@@ -8,9 +8,18 @@ from __future__ import annotations
 
 import pytest
 
-from netguard.gui.main_ui import NetGuardApp
+from netguard.gui.main_ui import (
+    _DEFAULT_DETAIL_COLUMNS,
+    _DEFAULT_PACKET_COLUMNS,
+    MIN_WINDOW_SIZE,
+    NetGuardApp,
+)
 
 SCREEN_W, SCREEN_H = 2048, 1152
+
+#: 并排面板之外的固定开销：操作轨 62 + 1px 分隔线 + 工作区左右内边距 20 +
+#: 两侧滚动条 26 + 分隔条 8 + 面板边框与标题栏余量
+_PANEL_CHROME_WIDTH = 150
 
 
 def clamp(geometry: str, screen: tuple[int, int] = (SCREEN_W, SCREEN_H)) -> str:
@@ -97,3 +106,29 @@ def test_legacy_sash_layout_is_discarded() -> None:
 
     assert effective(legacy) == {}
     assert effective(current) == current
+
+
+def test_default_column_budget_fits_minimum_window() -> None:
+    """数据包列表与检视面板的默认列宽之和必须落在最小窗口之内。
+
+    两者并排，各自的默认列宽之和就是窗口的硬需求：早期 870 + 390px 加上滚动条
+    与内边距已经超过 1280 的最小宽度，最小尺寸下网格会把右侧内容排到窗口外。
+    """
+    packets = sum(width for width, _ in _DEFAULT_PACKET_COLUMNS.values())
+    detail = sum(_DEFAULT_DETAIL_COLUMNS.values())
+    budget = MIN_WINDOW_SIZE[0] - _PANEL_CHROME_WIDTH
+    assert packets + detail <= budget, (
+        f"默认列宽 {packets + detail}px 超出最小窗口可用宽度 {budget}px"
+        f"（最小窗口 {MIN_WINDOW_SIZE[0]}px 减去固定开销 {_PANEL_CHROME_WIDTH}px）"
+    )
+
+
+def test_inspector_field_column_fits_empty_state_title() -> None:
+    """空状态标题要放得进「字段」列。
+
+    解析树单元格不换行，标题比列宽长就会被截成半句（"尚未选中数据[包]"）。
+    这里按 6 个全角字 + 层级缩进估算，字体度量随平台变化，留出余量。
+    """
+    indent = 24  # Treeview 默认层级缩进
+    cjk_char = 16  # 11pt 中文字形的保守宽度
+    assert cjk_char * 6 + indent <= _DEFAULT_DETAIL_COLUMNS["#0"]
