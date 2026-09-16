@@ -3,10 +3,18 @@
 一个进程内反复创建/销毁 Tk 根窗口会让 Tcl 解释器失效，因此这里用模块级
 单例窗口，每个用例只重置状态、不重建窗口。
 
-"无显示"的判定必须在子进程里带超时完成：无头 macOS 上 `tk.Tk()` 不是抛
-`TclError` 而是**挂起**，父进程的 try/except 永远等不到，整个测试会话卡死
-（CI 上表现为 job 长时间 in_progress 直至被取消）。Linux CI 则通过 Xvfb
-提供虚拟显示，使这些用例真正执行。
+显示探测放在子进程里并带超时，而不是在当前进程 `try: tk.Tk() except TclError`：
+
+- 需要超时兜底。CI 上曾出现测试步骤长时间 in_progress 直至被取消；在那次
+  现象中，同进程探测等不到任何异常，于是无从判定"无显示"也无法脱身。
+  确切触发条件未能单独复现（同一轮还改了其他因素），因此这里按"防御"处理：
+  无论 `tk.Tk()` 是抛错、返回还是卡住，探测都会在超时后给出"无显示"的结论，
+  测试会话不会被拖死。配合 pyproject 的 pytest timeout 形成双重保险。
+- 顺带避免把半初始化的 Tcl 状态留在测试进程里。
+
+注意 macOS runner 实测是**能**创建 Tk 窗口的（GUI 用例全部执行，与
+Windows/Linux 同为 264 passed），所以这些用例并非"在 macOS 上总是跳过"。
+Linux CI 另经 Xvfb 提供虚拟显示。
 """
 
 from __future__ import annotations
