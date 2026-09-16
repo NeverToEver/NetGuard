@@ -45,9 +45,10 @@ python -m pytest tests/ --cov=netguard
 python scripts/build_unix_app.py --python-env .venv
 ```
 
-Requirements: Python 3.11+. The launcher auto-detects the interpreter (repo `.venv`
-first, then PATH); `NETGUARD_PYTHON` overrides. `scripts/run_netguard.sh` and
-`check_interpreter.sh` are POSIX only — on Windows use `NetGuard.bat` or
+Requirements: Python 3.11+. `scripts/launch.py` is the single entry point and owns
+interpreter selection (`NETGUARD_PYTHON` > repo `.venv` > current) plus the version
+check; the shell/batch wrappers only find a Python to run it.
+`scripts/run_netguard.sh` is POSIX only — on Windows use `NetGuard.bat` or
 `scripts/run_netguard.ps1`.
 
 ## Architecture

@@ -6,7 +6,7 @@
       "type": "debugpy",
       "request": "launch",
       "program": "${workspaceFolder}/main.py",
-      "preLaunchTask": "Check project interpreter",
+      "preLaunchTask": "Check project environment",
       "console": "integratedTerminal",
       "cwd": "${workspaceFolder}"
     }

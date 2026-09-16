@@ -31,7 +31,7 @@ python3 -m venv .venv
 ./.venv/bin/python -m pip install -e .
 ```
 
-VS Code 调试和 `scripts/run_netguard.sh` 会自动检测可用的 Python 3.11+ 解释器，优先使用 `NETGUARD_PYTHON`、项目内 `.venv/bin/python` 和系统常见 Python 路径。缺失时会提示创建项目内环境。
+`scripts/launch.py` 统一负责解释器选择与版本校验，优先级为 `NETGUARD_PYTHON` → 项目内 `.venv/bin/python` → `PATH` 上的 `python3`/`python`；版本低于 3.11 时会给出明确提示。`NetGuard.sh` 与 `scripts/run_netguard.sh` 只是找到能运行它的 Python 后原样转交参数。缺失解释器时会提示创建项目内环境。
 
 ## 运行
 

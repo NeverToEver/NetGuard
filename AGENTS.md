@@ -83,12 +83,14 @@ finds the package without installing. Tests must not require libpcap, root, or a
 display — keep that property when adding tests.
 
 `scripts/launch.py` is the single cross-platform entry behind `NetGuard.bat` /
-`NetGuard.sh` and `scripts/run_netguard.*`: it resolves the interpreter (repo `.venv`
-first), supports `--check` (env self-check) and `--setup` (create `.venv` +
-`pip install -e .`), and forwards every other arg to `main.py`. `scripts/run_netguard.sh`
-and `check_interpreter.sh` are POSIX only. On Windows use `NetGuard.bat` /
-`scripts/run_netguard.ps1`, or invoke `python main.py` directly. Live capture needs
-elevation: `sudo` on Unix, an Administrator shell on Windows.
+`NetGuard.sh` and `scripts/run_netguard.*`: it resolves the interpreter
+(`NETGUARD_PYTHON` > repo `.venv` > current), enforces the 3.11 minimum, supports
+`--check` (env self-check) and `--setup` (create `.venv` + `pip install -e .`), and
+forwards every other arg to `main.py`. The shell/batch wrappers only locate a Python
+that can run `launch.py` — do not add version checks to them. `scripts/run_netguard.sh`
+is POSIX only. On Windows use `NetGuard.bat` / `scripts/run_netguard.ps1`, or invoke
+`python main.py` directly. Live capture needs elevation: `sudo` on Unix, an
+Administrator shell on Windows.
 
 `.gitattributes` pins `*.bat`/`*.ps1` to CRLF and `*.sh` to LF — `.bat` files with LF
 line endings make cmd mis-parse `if (...)` blocks and hang. Keep batch files ASCII-only

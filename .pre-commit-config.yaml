@@ -1,0 +1,38 @@
+# 提交前自动检查。安装：pre-commit install
+# 首次运行会自动下载 hook 环境；离线环境可先跳过（CI 会独立跑同样的检查）。
+default_language_version:
+  python: python3.11
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.7
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+      - id: end-of-file-fixer
+        # .bat/.cmd/.ps1 的换行由 .gitattributes 固定为 CRLF，且批处理文件
+        # 若被改成 LF 会让 cmd 误解析 if (...) 块并挂起（见 AGENTS.md）
+        exclude: '\.(bat|cmd|ps1)$'
+      - id: trailing-whitespace
+        exclude: '\.(bat|cmd|ps1)$'
+
+  # mypy 用 local hook：需要读取 pyproject.toml 的 strict 配置与项目依赖，
+  # 复用已安装的环境最省事
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy (strict)
+        entry: python -m mypy
+        language: system
+        types: [python]
+        pass_filenames: false

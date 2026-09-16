@@ -2,9 +2,34 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "Check project interpreter",
+      "label": "Check project environment",
       "type": "shell",
-      "command": "${workspaceFolder}/scripts/check_interpreter.sh",
+      "command": "python",
+      "args": [
+        "${workspaceFolder}/scripts/launch.py",
+        "--check"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "Run tests",
+      "type": "shell",
+      "command": "python",
+      "args": ["-m", "pytest", "tests/", "-v"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Lint (ruff)",
+      "type": "shell",
+      "command": "python",
+      "args": ["-m", "ruff", "check", "src", "tests", "scripts", "main.py"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Type check (mypy)",
+      "type": "shell",
+      "command": "python",
+      "args": ["-m", "mypy"],
       "problemMatcher": []
     }
   ]
