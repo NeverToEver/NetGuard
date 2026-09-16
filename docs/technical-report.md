@@ -143,7 +143,9 @@ GUI 使用 Tkinter 实现，主要区域包括：
 
 为了避免 Windows 设备名过长且难以识别，网卡下拉框优先显示友好描述和 Mac 对应提示。
 
-夜间模式由 `NetGuardApp.dark_mode` 和 `_apply_theme()` 实现。实现时固定使用同一个 ttk 主题，只切换颜色配置，不在明暗模式之间切换 ttk 主题结构，避免按钮 padding、边框和控件尺寸被重新计算，从而保证切换夜间模式时顶部按钮位置不跳动。`Text`、`Listbox` 等传统 Tk 控件会被登记到 `_classic_widgets`，统一应用背景色、前景色、选中色和光标色。
+主题由 `gui/theme.py` 的 `ThemeManager` 统一管理，模式状态存在 `NetGuardApp.theme_mode`（取值 `light` / `dark` / `system`），由 `gui/config.py` 的 `resolve_theme_mode()` 归一化读写，并保留旧版 `dark_mode`（布尔）配置的迁移。`system` 模式下由 `detect_system_dark()` 定期检测系统深浅色并自动切换。
+
+切换实现时固定使用同一个 ttk 主题（`clam`），只替换 `build_colors()` 给出的颜色配置，不在明暗模式之间切换 ttk 主题结构，避免按钮 padding、边框和控件尺寸被重新计算，从而保证切换主题时顶部按钮位置不跳动。`Text`、`Listbox` 等传统 Tk 控件会被登记到 `_classic_widgets`，统一应用背景色、前景色、选中色和光标色；打开中的对话框通过 `wire_dialog_theme()` 监听 `<<ThemeChanged>>` 一并重刷，不会出现"花脸"。
 
 ## 9. 测试与验证
 
@@ -184,15 +186,23 @@ NetGuard 只应在授权网络、实验室环境或自有设备上使用。抓�
 
 ## 11. 后续改进方向
 
+已完成（原文列为待办，现已实现）：
+
+- ~~主题配置持久化~~：`theme_mode` 已随窗口状态写入 `~/.netguard_config.json`，并支持跟随系统
+- ~~ICMP 解析~~：已解析 ICMP Echo / Echo Reply，并新增 ICMP flood 检测器
+- ~~跨平台 CI~~：GitHub Actions 覆盖 Ubuntu / Windows / macOS × Python 3.11 / 3.12
+- ~~网卡推荐标记~~：`interface_mapping.py` 提供推荐网卡与推荐理由
+
 后续可以继续增强：
 
 - Windows 默认网卡识别：结合 `Get-NetIPConfiguration` 找出有默认网关的接口
-- 接口映射持久化：把手动 `en0` / `en1` 映射保存到用户配置文件
-- 协议支持扩展：增加 IPv6、ARP、TLS SNI、ICMP 等解析
-- 规则引擎增强：支持更多条件、方向、大小写匹配和规则分组
-- UI 可用性优化：增加网卡搜索、推荐标记和实时抓包速率图
-- 主题配置持久化：保存用户选择的夜间模式状态
-- 测试环境完善：提供 Windows Npcap mock 和跨平台 CI
+- 协议支持扩展：增加 IPv6、ARP、TLS SNI
+- 规则语法扩展：`offset` / `depth` / `flags` / `threshold` / `sid`（见 `docs/roadmap.md` A 组）
+- IPv4 分片重组：当前对非首片仅标记 `fragment_offset`，不重组
+- UI 可用性优化：网卡搜索、实时抓包速率图、大结果集虚拟滚动
+- 工程化：覆盖率门槛提升、Windows 打包链路（PyInstaller）
+
+完整的优先级清单见 [`docs/roadmap.md`](roadmap.md)。
 
 ## 12. 结论
 

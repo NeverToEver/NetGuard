@@ -1,5 +1,10 @@
 # NetGuard
 
+[![tests](https://github.com/NeverToEver/NetGuard/actions/workflows/tests.yml/badge.svg)](https://github.com/NeverToEver/NetGuard/actions/workflows/tests.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+[![Typing: mypy strict](https://img.shields.io/badge/typing-mypy%20strict-brightgreen.svg)](pyproject.toml)
+
 跨平台网络数据包监控与轻量 IDS 工具，参考 Wireshark 工作方式设计。
 
 支持 Linux、macOS、Windows（Npcap/WinPcap），纯 Python 标准库实现（零运行时依赖）。
@@ -10,13 +15,50 @@
 - **离线 pcap** — 纯标准库读写 `.pcap` 文件，可回放实验、保存结果、与 Wireshark/tcpdump 交叉验证
 - **协议解析** — 自解析 Ethernet → IPv4 → TCP/UDP → HTTP/DNS/ICMP，结构化错误处理
 - **IDS 规则** — 类 Snort 语法，协议/端口/content 匹配，实时告警
-- **攻击检测** — 跨包时间窗口检测 SYN flood、端口扫描、DNS 隧道（补充单包规则）
+- **攻击检测** — 跨包时间窗口检测 SYN flood、端口扫描、DNS 隧道、ICMP flood、暴力破解
 - **会话重组** — TCP 乱序片段重组、流追踪、超时清理；内容规则可在重组流中匹配，防御拆包绕过
 - **图形界面** — Tkinter：包列表、协议详情、十六进制视图、告警日志、统计面板、列排序、BPF/显示过滤
 - **桌面交互惯例** — 菜单栏与快捷键、表格右键菜单与复制、窗口/布局记忆、悬停提示、跟随系统深浅色主题
 - **结构化告警** — 告警可导出为 JSON（每行一条），便于对接 SIEM 或后续分析
 
 ## 架构
+
+数据流：`capture/source → processing → pipeline(事件队列) → gui`。
+
+```mermaid
+flowchart LR
+    subgraph capture["抓包层"]
+        A["pcap.py<br/>ctypes 绑定<br/>libpcap/Npcap"]
+        B["source.py<br/>CaptureSource<br/>抓包/回放线程"]
+        C["pcap_file.py<br/>离线 pcap 读写"]
+    end
+
+    subgraph proc["处理层"]
+        D["processing.py<br/>PacketProcessor"]
+        E["parser/packet.py<br/>协议解码"]
+        F["session/tracker.py<br/>TCP 会话重组"]
+        G["statistics<br/>速率统计"]
+        H["rules/engine.py<br/>IDS 规则引擎"]
+        I["detection/<br/>时间窗口检测器"]
+    end
+
+    subgraph ui["界面层"]
+        J["pipeline.py<br/>PacketPipeline<br/>事件队列"]
+        K["gui/main_ui.py<br/>Tkinter 主窗口"]
+    end
+
+    A --> B
+    C --> B
+    B -->|raw_queue| D
+    D --> E --> F --> H
+    D --> G
+    D --> I
+    H --> J
+    I --> J
+    J -->|event_queue<br/>pump() 每 250ms| K
+```
+
+模块清单：
 
 ```
 main.py                     入口点
@@ -37,7 +79,7 @@ src/netguard/
 │   └── suggestions.py      规则建议
 ├── detection/
 │   ├── base.py             Detector 协议
-│   └── detectors.py        SYN flood / 端口扫描 / DNS 隧道检测器
+│   └── detectors.py        SYN flood / 端口扫描 / DNS 隧道 / ICMP flood / 暴力破解
 ├── session/
 │   └── tracker.py          TCP 会话重组与流管理
 ├── statistics/
@@ -53,9 +95,16 @@ src/netguard/
     └── view_models.py      显示格式化工具
 ```
 
-数据流：`capture/source → processing → pipeline(事件队列) → gui`。
-
 ## 界面与快捷键
+
+![NetGuard 主界面（浅色）](docs/images/main-light.png)
+
+<details>
+<summary>深色主题</summary>
+
+![NetGuard 主界面（深色）](docs/images/main-dark.png)
+
+</details>
 
 主窗口包含菜单栏、工具栏、显示过滤栏、数据包列表、协议详情/十六进制视图、
 告警与解析问题面板、统计与 IDS 规则面板，以及底部状态栏。
@@ -186,38 +235,59 @@ TCP 段（拆包绕过）仍会命中；同一会话内同一规则只告警一�
 | SYN flood | 窗口内同一 (目的IP, 端口) 的 SYN 数 | 5s / 100 |
 | 端口扫描 | 窗口内同一源访问的不同目的端口数 | 10s / 20 |
 | DNS 隧道 | 超长域名/标签，或同一后缀高频查询 | 10s / 50 |
+| ICMP flood | 窗口内同一 (源, 目的) 的 ICMP Echo 数 | 5s / 100 |
+| 暴力破解 | 窗口内发往 SSH/FTP/Telnet 等服务端口的 SYN 数 | 60s / 10 |
 
 ## 性能
 
-合成流量下的基准数据（Windows 10 / Python 3.11，20 万包）：
+合成流量下的基准数据（Windows 11 / Python 3.11.9，20 万包，500 条规则）：
 
 | 项目 | 结果 |
 | --- | --- |
-| 协议解析吞吐 | 约 12.7 万 包/秒（约 8.3 MB/s） |
-| 端到端流水线 | 约 5.1 万 包/秒 |
-| 单包解析耗时 | 约 7.9 µs |
-| 规则匹配（500 条） | 中位约 247 µs，P99 约 589 µs |
-| 内存增量（5 万包） | 约 8.9 MB |
+| 协议解析吞吐 | 约 12.5 万 包/秒（约 8.3 MB/s） |
+| 端到端流水线 | 约 4.9 万 包/秒 |
+| 单包解析耗时 | 约 8.0 µs |
+| 规则匹配（500 条） | 中位约 0.9 µs，P99 约 2.5 µs |
+| 内存增量（5 万包） | 约 9.2 MB |
 | 合成攻击场景检出 | 3 / 3 |
 | 正常流量误报率 | 0.100% |
 
 复现：`python scripts/benchmark.py --packets 200000 --rules 500 --markdown`
 （详见 [docs/benchmark.md](docs/benchmark.md)）
 
+> 表中数字与 `docs/benchmark-results.json` 同源。规则匹配在引入端口二级索引前
+> 中位为 247 µs，上表为改造后实测值。
+
 ## 开发
 
 ```bash
+# 安装开发依赖（ruff / mypy / pytest-cov / pre-commit）
+pip install -e ".[dev]"
+
 # 运行全部测试
 python -m pytest tests/ -v
 
 # 运行单个测试文件
 python -m pytest tests/test_parser.py -v
 
-# 语法检查
-python -m compileall -q src tests scripts
+# 带覆盖率（门槛 60%，配置见 pyproject.toml）
+python -m pytest tests/ --cov=netguard --cov-report=term-missing
+
+# 代码检查与格式化
+python -m ruff check src tests scripts main.py
+python -m ruff format src tests scripts main.py
+
+# 类型检查（strict）
+python -m mypy
+
+# 安装 git 钩子，提交前自动执行上述检查
+pre-commit install
 ```
 
-CI 在 GitHub Actions 上对 Ubuntu / Windows × Python 3.11 / 3.12 运行测试。
+CI 在 GitHub Actions 上运行 4 个任务：`lint`（ruff check + format check）、
+`typecheck`（mypy strict）、`pytest`（Ubuntu / Windows / macOS × Python 3.11 / 3.12，
+带覆盖率门槛）、`benchmark`（检出率与误报率回归门槛）。
+详见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 打包
 
@@ -229,15 +299,16 @@ python3 scripts/build_unix_app.py --python-env .venv
 
 ## 文档
 
-- [Linux 安装](docs/install-linux.md)
-- [macOS 安装](docs/install-macos.md)
-- [Windows 安装](docs/install-windows.md)
+文档索引见 [docs/README.md](docs/README.md)。
+
 - [使用说明](docs/usage.md)
-- [实验室演示](docs/lab-demo.md)
 - [技术报告](docs/technical-report.md)
 - [性能基准](docs/benchmark.md)
 - [后续工作路线图](docs/roadmap.md)
-- [Linux 可执行文件分发指南](docs/distribute-linux.md)
+- [贡献指南](CONTRIBUTING.md) · [变更记录](CHANGELOG.md)
+- 安装：[Linux](docs/install-linux.md) · [macOS](docs/install-macos.md) · [Windows](docs/install-windows.md)
+- 实验与演示：[实验流程](docs/experiment-workflow.md) · [实验室演示](docs/lab-demo.md)
+- 分发与评审：[Linux 可执行文件分发](docs/distribute-linux.md) · [历次代码审查](docs/reviews/)
 
 ## License
 

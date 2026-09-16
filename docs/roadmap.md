@@ -109,15 +109,17 @@ agents）接手。按优先级与主题分组；每项给出背景、现状与�
   建议：新增 Windows 打包（PyInstaller 或嵌入运行时），在 `docs/install-windows.md`
   补充说明。
 
-- [ ] **[P1] CI 增强**
-  已有：GitHub Actions 在 Ubuntu/Windows × Python 3.11/3.12 跑测试。
-  建议：加入 `mypy` 类型检查与覆盖率统计（并可设最低阈值门槛）。
+- [x] **[P1] CI 增强** ✅ 已完成
+  已完成：`ruff check` + `ruff format --check`、`mypy --strict`、覆盖率门槛、
+  矩阵补 macos-latest，benchmark 启用 `--fail-on-miss` 作为检出质量门槛。
 
-- [ ] **[P2] 覆盖率与质量门槛**
-  生成覆盖率报告，逐步为 `parser`、`rules`、`detection` 设定门槛。
+- [x] **[P2] 覆盖率与质量门槛** ✅ 已完成
+  已启用 `pytest-cov`（`branch = true`），全局门槛 60%（当前实测约 61%）。
+  按模块的更高门槛仍可后续细分。
 
-- [ ] **[P2] 版本与发布流程**
-  维护 CHANGELOG、打 tag、产出 Release 说明与构建产物。
+- [x] **[P2] 版本与发布流程** ✅ 已完成
+  已有 `CHANGELOG.md`（Keep a Changelog）、版本单一来源 `_version.py`、
+  `release.yml`（tag 触发构建 + 校验版本一致 + 创建 Release）。
 
 - [ ] **[P2] macOS 签名/公证文档**
   分发 `.app` 时需要 codesign/notarization；`build_unix_app.py` 已有 codesign 调用，
@@ -127,10 +129,14 @@ agents）接手。按优先级与主题分组；每项给出背景、现状与�
 
 ## E. 文档
 
-- [ ] **[P1] README 增加架构图与截图**
-  现状：仅有文字与代码块架构说明。建议补 mermaid 数据流图与界面截图/GIF。
+- [x] **[P1] README 增加架构图与截图** ✅ 已完成
+  已补 mermaid 数据流图、浅色/深色界面截图（`docs/images/`）、CI 徽章。
 - [ ] **[P2] 中英双语/英文文档**
   便于外部评审与展示。
+- [ ] **[P2] 静态检查规则扩展**
+  当前启用 E/W/F/I/N/UP/B/C4/SIM/RET/PIE/RUF/S110/S112。可后续评估
+  `ARG`（未使用参数）、`PTH`（os.path 迁移）、`D`（docstring 覆盖率）；
+  本次刻意未启用以免 diff 失焦。
 
 ---
 
