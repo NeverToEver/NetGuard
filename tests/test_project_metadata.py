@@ -125,6 +125,34 @@ def test_dev_dependencies_declared() -> None:
         assert tool_name in joined, f"dev 依赖缺少 {tool_name}"
 
 
+def test_test_extra_covers_ci_command() -> None:
+    """CI 装的是 ``.[test]``，因此它用到的插件必须都在 test 组内。
+
+    回归用例：pytest-cov 曾只声明在 dev 组，而 CI 以 ``.[test]`` 安装后直接
+    执行 ``pytest --cov=...``，导致 6 个矩阵任务全部以
+    "unrecognized arguments: --cov" 失败——本地装了 dev 依赖所以从未暴露。
+    """
+    config = _load_pyproject()
+    extras = config["project"]["optional-dependencies"]
+    test_joined = " ".join(extras["test"])
+
+    workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
+    assert "pytest-cov" in test_joined, "CI 使用 --cov，pytest-cov 必须在 test 组"
+    assert "--cov" in workflow
+    assert "[test]" in workflow, "CI 应以 .[test] 安装依赖"
+
+
+def test_mypy_platform_is_pinned() -> None:
+    """mypy 必须固定 platform，保证本地与 CI 结论一致。
+
+    回归用例：gui/theme.py 用 winreg 探测系统深浅色（仅 Windows 存在）。
+    未固定 platform 时 mypy 按宿主平台加载 typeshed，于是 Windows 本地通过、
+    Linux CI 报 3 个 attr-defined，两边结论相反——本地验证无法预测 CI 结果。
+    """
+    mypy_config = _load_pyproject()["tool"]["mypy"]
+    assert mypy_config.get("platform"), "mypy 未固定 platform：含平台条件导入的代码会导致本地与 CI 结论不一致"
+
+
 def test_ci_workflow_runs_all_gates() -> None:
     """CI 必须实际执行 lint / 类型检查 / 测试 / 基准，而不是只做语法编译。"""
     workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")

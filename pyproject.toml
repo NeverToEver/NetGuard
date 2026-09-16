@@ -45,7 +45,9 @@ Changelog = "https://github.com/NeverToEver/NetGuard/blob/main/CHANGELOG.md"
 netguard = "netguard.app:main"
 
 [project.optional-dependencies]
-test = ["pytest>=7.4"]
+# CI 用 `pip install -e ".[test]"` 安装，随后以 --cov 运行 pytest，
+# 因此 pytest-cov 必须属于 test 组，否则 CI 会报 unrecognized arguments。
+test = ["pytest>=7.4", "pytest-cov>=5.0"]
 dev = [
   "pytest>=7.4",
   "pytest-cov>=5.0",
@@ -121,6 +123,13 @@ strict = true
 show_error_codes = true
 warn_unused_ignores = true
 warn_redundant_casts = true
+# 固定平台，使检查结论不随宿主系统变化。
+# 背景：gui/theme.py 用 winreg 探测系统深浅色，该模块只存在于 Windows。
+# mypy 默认按运行平台加载 typeshed，于是"Windows 本地通过、Linux CI 报
+# attr-defined"——两边结论相反，本地验证无法预测 CI。这里显式固定为 win32；
+# src/netguard 未使用任何 POSIX 专用模块，因此该固定不会掩盖真实问题。
+# 改动前请先确认仍无 POSIX-only 依赖。
+platform = "win32"
 
 # Tkinter 控件属性为运行时动态挂载，strict 在此文件上收益低、噪声大。
 # no-untyped-call 特指"调用未标注的函数"：typeshed 的 tkinter stub 至今未标注
