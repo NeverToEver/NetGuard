@@ -551,9 +551,6 @@ class NetGuardApp(tk.Tk):
             self._apply_theme()
         self.after(SYSTEM_THEME_POLL_MS, self._poll_system_theme)
 
-    def _load_config(self) -> dict[str, Any]:
-        return self._config.to_dict()
-
     def _schedule_config_save(self) -> None:
         if not self._config_ready:
             return
@@ -1537,9 +1534,6 @@ class NetGuardApp(tk.Tk):
             self.busy_text_var.set("")
             with suppress(tk.TclError):
                 self.configure(cursor="")
-
-    def _on_busy(self, text: str) -> None:
-        self.busy_text_var.set(text)
 
     def _load_devices(self) -> None:
         self._log("正在加载网卡...")
@@ -3190,7 +3184,6 @@ class SubnetScanDialog(tk.Toplevel):
         self._on_switch_device = on_switch_device
         self._on_add_bpf_template = on_add_bpf_template
         self._current_display = device_display
-        self._all_displays = all_displays
         self._displays_with_ip = [d for d in all_displays if d.ip_addresses]
         self._subnets = extract_subnets(device_display.ip_addresses, device_display.device.netmasks)
         if not self._subnets:
@@ -3333,7 +3326,13 @@ class SubnetScanDialog(tk.Toplevel):
         self._event_queue.put((name, args))
 
     def _drain_events(self) -> None:
-        """主线程轮询消费工作线程事件；对话框销毁后轮询链自然终止。"""
+        """主线程轮询消费工作线程事件；对话框销毁后轮询链自然终止。
+
+        处理函数按名字解析成 ``_ev_<事件名>``，因此这些方法在静态引用里查不到——
+        改名或删除必须连带 _post_event 的调用点一起改。事件名与处理函数由
+        _post_event 的调用点定义（sweep_progress / sweep_done / ping_progress /
+        ping_done / resolve_progress / resolve_done）。
+        """
         try:
             while True:
                 name, args = self._event_queue.get_nowait()

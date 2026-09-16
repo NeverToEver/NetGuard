@@ -209,7 +209,6 @@ class StatCard(tk.Frame):
             self._value_row, text=value, anchor=tk.W, font=font_metric, background=surface, foreground=colors["text"]
         )
         self._value.pack(side=tk.LEFT)
-        self._unit = unit
         self._unit_label = tk.Label(
             self._value_row,
             text=unit,
@@ -226,7 +225,6 @@ class StatCard(tk.Frame):
             self._spark = Sparkline(self._inner, background=surface, color=colors["accent"])
             self._spark.pack(fill=tk.X, pady=(2, 0))
 
-        self._colors: dict[str, str] = {}
         self.apply_colors(colors)
 
     @property
@@ -236,7 +234,6 @@ class StatCard(tk.Frame):
     def set_value(self, text: str, *, unit: str | None = None) -> None:
         self._value.configure(text=text)
         if unit is not None:
-            self._unit = unit
             self._unit_label.configure(text=unit)
 
     def push_sample(self, value: float) -> None:
@@ -248,7 +245,6 @@ class StatCard(tk.Frame):
             self._spark.clear()
 
     def apply_colors(self, colors: dict[str, str]) -> None:
-        self._colors = colors
         surface = colors["surface"]
         self.configure(background=surface)
         self._inner.configure(background=surface)
@@ -321,9 +317,6 @@ class PanelHeader(tk.Frame):
         self._title.pack(side=tk.LEFT)
         self.actions = tk.Frame(self, background=surface2, borderwidth=0, highlightthickness=0)
         self.actions.pack(side=tk.RIGHT, padx=(0, 10))
-
-    def set_title(self, text: str) -> None:
-        self._title.configure(text=text)
 
     def apply_colors(self, colors: dict[str, str]) -> None:
         background = colors["surface_2"]
