@@ -83,18 +83,31 @@ main.py                          # Entry point: CLI args → console or GUI
     │   └── subnet.py            # subnet sweep + host resolution
     ├── trafficgen.py            # synthetic packet templates (demo/bench/test)
     └── gui/
-        ├── main_ui.py           # Tkinter UI: menu, toolbar, table, detail/hex, alerts, stats
+        ├── main_ui.py           # Tkinter shell: title bar, action rail, KPI strip,
+        │                        #   packet table, detail/hex inspector, bottom tabs
         ├── config.py            # AppConfig: ~/.netguard_config.json + legacy dark_mode migration
-        ├── theme.py             # ThemeManager + colors + system-theme detection + menu styling
-        ├── widgets.py           # Tooltip
-        └── view_models.py       # Display helpers: packet formatting, search text extraction
+        ├── theme.py             # ThemeManager + design tokens + severity/protocol colors
+        ├── widgets.py           # Tooltip, StatCard, Sparkline, StatusPill, PanelHeader
+        └── view_models.py       # Display helpers: rows, protocol parse tree, hex rows
 ```
 
-**GUI conventions** (`gui/`): colors come from `theme.build_colors()` only (never hardcoded);
-persistence goes through `gui.config.AppConfig` (window geometry, sashes, column widths, sort
+**GUI conventions** (`gui/`): colors come from `theme.build_colors()` only (never hardcoded) —
+prefer raw tokens (`surface_2`, `border`, `text_dim`, `accent`, `proto_*`); legacy keys
+(`bg`/`toolbar`/`panel`/`muted`) survive for older dialog code. Native `tk` widgets are
+registered via `NetGuardApp._paint(...)` so theme switches re-colour them; Treeview row colors
+are tags from `theme.tag_tree()`. Alert severity comes from the structured `Alert.severity`
+via `theme.severity_key()`, not message keyword matching. Rail buttons live in
+`self._rail_buttons` (update labels with `_set_rail_text`, states with `_update_control_states`).
+Persistence goes through `gui.config.AppConfig` (window geometry, sashes, column widths, sort
 state, last device, filters); shortcuts bind to the main window, not `bind_all`, so dialogs are
 unaffected; dialogs center on the parent, support `Esc`, and re-theme on `<<ThemeChanged>>`;
 long file operations run via `NetGuardApp._run_in_background` with status-bar feedback.
+
+Two Tk sizing traps that have bitten this layout: `tk.Text` defaults to `width=80` characters
+and `tk.Canvas` to ~378px, so fill-style widgets must pass `width=1`; and
+`ttk.PanedWindow.sashpos()` clamps against the current space, so sash restoration has to wait
+for the first real layout (see `_apply_sash_positions`) and compute defaults from the pane's
+own size, not the window's.
 
 **Pipeline threading model** (`pipeline.py` + `capture/source.py` + `processing.py`):
 `CaptureSource` runs the `_capture_worker` (or `_file_worker` for pcap replay) filling

@@ -171,26 +171,89 @@ def test_theme_switching_updates_dark_flag(app) -> None:
 
 
 def test_theme_switch_with_existing_alert_rows(app) -> None:
-    """告警列表非空时切换主题不得抛错。
+    """告警表非空时切换主题不得抛错，且每行按严重度重新打标签。
 
-    回归用例：_refresh_alert_colors 曾用 Listbox.get(index, index)，该双参数
-    形式返回元组，会把元组喂给 severity_color 触发 AttributeError；异常类型
-    不在 except tk.TclError 覆盖范围内，直接冒泡中断主题切换。
+    回归用例：告警区曾是 Listbox，用 per-item 前景色着色，而
+    ``Listbox.get(index, index)`` 返回的是元组，会把元组喂给 severity_color
+    触发 AttributeError——异常类型不在 except tk.TclError 覆盖范围内，
+    直接冒泡中断主题切换。改成 Treeview + tag 之后走的是另一条路径，
+    这里守住「换肤后标签仍与严重度一致」这个不变量。
     """
+    from netguard.rules.engine import Alert
+
+    def make_alert(severity: str, kind: str, rule_id: str | None, msg: str) -> Alert:
+        return Alert(
+            timestamp=1.0,
+            msg=msg,
+            protocol="TCP",
+            src="10.0.0.1",
+            dst="10.0.0.2",
+            src_port=12345,
+            dst_port=80,
+            summary=msg,
+            kind=kind,
+            severity=severity,
+            rule_id=rule_id,
+        )
+
     app.alerts_placeholder = False
-    app.alerts.delete(0, "end")
-    app.alerts.insert("end", "[严重] 疑似 SYN Flood：5s 内 120 个 SYN")
-    app.alerts.insert("end", "检测到 HTTP GET 请求")
+    app.alerts.delete(*app.alerts.get_children())
+    app._insert_alert_rows(
+        [
+            (0, make_alert("high", "anomaly", "syn-flood", "疑似 SYN Flood")),
+            (1, make_alert("medium", "rule", None, "检测到 HTTP GET 请求")),
+        ]
+    )
+    assert app._real_alert_count() == 2
 
     app._set_theme_mode("dark")
-    assert app.alerts.size() == 2
+    assert len(app.alerts.get_children()) == 2
     app._set_theme_mode("light")
 
-    # 每行前景色应已按严重度刷新为具体颜色
-    assert app.alerts.itemcget(0, "fg")
+    # 两行严重度不同 → 标签不同，且与结构化 severity 对应
+    rows = app.alerts.get_children()
+    assert app.alerts.item(rows[0], "tags")[0] == "high"
+    assert app.alerts.item(rows[1], "tags")[0] == "medium"
 
-    app.alerts.delete(0, "end")
+    app.alerts.delete(*app.alerts.get_children())
+    app.alerts_placeholder = True
     app._set_theme_mode("system")
+
+
+def test_detail_and_hex_views_populate_on_selection(app) -> None:
+    """选中数据包后，解析树与十六进制视图都应写入内容。"""
+    from netguard.parser.packet import PacketInfo
+    from netguard.pipeline import PacketEvent
+
+    app.events = [
+        PacketEvent(
+            PacketInfo(
+                timestamp=1.0,
+                length=60,
+                raw=b"GET / HTTP/1.1\r\n\r\n",
+                protocol="HTTP",
+                src="10.0.0.1",
+                dst="10.0.0.2",
+                src_port=12345,
+                dst_port=80,
+                summary="GET / HTTP/1.1",
+                payload=b"GET / HTTP/1.1\r\n\r\n",
+            ),
+            (),
+        )
+    ]
+    app.event_offset = 0
+    app._fill_detail_tree(app.events[0].packet)
+    app._fill_hex_view(app.events[0].packet)
+
+    top = app.detail.get_children()
+    assert top, "解析树应有帧信息分组"
+    # 帧信息 → 摘要 一行应带上原摘要（值列用 Treeview.set 读取）
+    frame_children = app.detail.get_children(top[0])
+    rendered = [app.detail.item(iid, "text") for iid in frame_children]
+    rendered += [app.detail.set(iid, "value") for iid in frame_children]
+    assert any("GET / HTTP/1.1" in str(item) for item in rendered)
+    assert "47 45 54" in app.hex_view.get("1.0", "end")
 
 
 def test_night_mode_toggle_overrides_system(app) -> None:
