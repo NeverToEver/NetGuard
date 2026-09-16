@@ -48,9 +48,10 @@ pre-commit install
   快捷键绑定主窗口 `self.bind`（不要 `bind_all`）；对话框需 `center_on_parent`
   + `bind_dialog_keys` + `wire_dialog_theme`；耗时 I/O 走 `_run_in_background`。
 - **测试不依赖环境**：测试必须能在无 libpcap、无 root、无显示器的环境下运行
-  （GUI 用例通过 `importorskip` 与 `TclError` 跳过）。
+  （GUI 冒烟用例通过 `pytest.importorskip` 与带超时的显示探测跳过；
+  Linux CI 用 Xvfb 提供虚拟显示使其真正执行）。
 
-详细架构说明见 [AGENTS.md](../AGENTS.md) 与 [docs/technical-report.md](technical-report.md)。
+详细架构说明见 [AGENTS.md](AGENTS.md) 与 [docs/technical-report.md](docs/technical-report.md)。
 
 ## 测试
 

@@ -38,6 +38,65 @@ def _local_links(text: str) -> list[str]:
     return found
 
 
+#: 不参与文档校验的目录：构建/缓存产物与本地 scratch（tmp/ 在 .gitignore 内）
+_IGNORED_DIRS = {".git", "__pycache__", "tmp", "build", "dist", "output", ".venv", ".mypy_cache", ".pytest_cache"}
+
+
+def _published_docs() -> list[Path]:
+    """会被发布的 markdown：排除构建产物与本地 scratch 目录。"""
+    docs: list[Path] = []
+    for doc in ROOT.rglob("*.md"):
+        if any(part in _IGNORED_DIRS for part in doc.relative_to(ROOT).parts):
+            continue
+        docs.append(doc)
+    return sorted(docs)
+
+
+def _all_repo_paths() -> set[str]:
+    """仓库内所有文件的 POSIX 相对路径（大小写原样保留，排除构建/scratch）。"""
+    paths: set[str] = set()
+    for path in ROOT.rglob("*"):
+        parts = path.relative_to(ROOT).parts
+        if any(part in _IGNORED_DIRS for part in parts):
+            continue
+        paths.add(path.relative_to(ROOT).as_posix())
+    return paths
+
+
+def _normalized_link(doc: Path, target: str) -> str:
+    """把链接目标归一化为仓库相对路径（处理 ./ 与 ../）。
+
+    doc 与 ROOT 都是绝对路径，因此先取相对 ROOT 的部分，结果才能与
+    _all_repo_paths() 的返回值直接比较。
+    """
+    base = doc.parent.relative_to(ROOT)
+    parts: list[str] = []
+    for segment in (base / target).as_posix().split("/"):
+        if segment == "..":
+            if parts:
+                parts.pop()
+        elif segment not in (".", ""):
+            parts.append(segment)
+    return "/".join(parts)
+
+
+def _case_sensitive_link_problems() -> list[str]:
+    """逐份文档校验相对链接，且区分大小写。
+
+    不能用 Path.exists()：Windows 文件系统不区分大小写，`Docs/README.md`
+    这类错误在本地"存在"，到了 Linux CI 才变成 404。这里与真实的仓库路径
+    集合做精确比对，使该类问题在本地即可发现。
+    """
+    real = _all_repo_paths()
+    problems: list[str] = []
+    for doc in _published_docs():
+        for target in _local_links(doc.read_text(encoding="utf-8")):
+            resolved = _normalized_link(doc, target)
+            if resolved not in real:
+                problems.append(f"{doc.relative_to(ROOT).as_posix()} -> {target}")
+    return problems
+
+
 def test_readme_relative_links_resolve() -> None:
     """README 中的每个相对链接都必须指向真实存在的文件。"""
     missing = [target for target in _local_links(README.read_text(encoding="utf-8")) if not (ROOT / target).exists()]
@@ -51,6 +110,17 @@ def test_readme_images_exist() -> None:
     assert images, "README 应至少引用一张界面截图"
     for image in images:
         assert (ROOT / image).exists(), f"截图不存在：{image}"
+
+
+def test_all_document_links_are_case_sensitive_valid() -> None:
+    """全仓 markdown 链接必须大小写精确匹配。
+
+    回归用例：CONTRIBUTING.md 曾写作 `[docs/technical-report.md](technical-report.md)`
+    （链接文本有 docs/、目标没有），在区分大小写的 Linux 上是死链；
+    修正前本项目在 Ubuntu CI 与本地 Windows 上表现不一致。
+    """
+    problems = _case_sensitive_link_problems()
+    assert not problems, f"存在大小写或路径不匹配的链接：{problems}"
 
 
 def _tracked_docs() -> list[Path]:
@@ -88,16 +158,6 @@ def test_docs_index_covers_all_docs() -> None:
         if doc.name == "README.md" or doc.parent != DOCS:
             continue
         assert doc.name in index_text, f"文档未被索引：docs/{doc.name}"
-
-
-def test_docs_relative_links_resolve() -> None:
-    """docs/ 下所有 markdown 的相对链接都要能解析。"""
-    problems: list[str] = []
-    for doc in DOCS.rglob("*.md"):
-        for target in _local_links(doc.read_text(encoding="utf-8")):
-            if not (doc.parent / target).exists():
-                problems.append(f"{doc.relative_to(ROOT)} -> {target}")
-    assert not problems, f"docs 中存在失效链接：{problems}"
 
 
 def test_quality_gate_config_present() -> None:

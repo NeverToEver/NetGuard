@@ -2,11 +2,18 @@
 
 一个进程内反复创建/销毁 Tk 根窗口会让 Tcl 解释器失效，因此这里用模块级
 单例窗口，每个用例只重置状态、不重建窗口。
+
+"无显示"的判定必须在子进程里带超时完成：无头 macOS 上 `tk.Tk()` 不是抛
+`TclError` 而是**挂起**，父进程的 try/except 永远等不到，整个测试会话卡死
+（CI 上表现为 job 长时间 in_progress 直至被取消）。Linux CI 则通过 Xvfb
+提供虚拟显示，使这些用例真正执行。
 """
 
 from __future__ import annotations
 
 import queue
+import subprocess
+import sys
 import time
 
 import pytest
@@ -16,17 +23,52 @@ tk = pytest.importorskip("tkinter")
 _app = None
 _skip_reason = ""
 
+#: 子进程探测 Tk 的超时（秒）。正常环境下一瞬间即可完成；超时即视为无显示。
+_DISPLAY_PROBE_TIMEOUT = 30.0
+_display_probe: tuple[bool, str] | None = None
+
+
+def _probe_display() -> tuple[bool, str]:
+    """在子进程中探测能否创建 Tk 窗口，结果缓存。
+
+    用子进程而非当前进程：既能在挂起时靠超时脱身，又能避免把探测过程中可能
+    产生的半初始化 Tcl 状态留在测试进程里。
+    """
+    global _display_probe
+    if _display_probe is not None:
+        return _display_probe
+
+    code = "import tkinter; r = tkinter.Tk(); r.withdraw(); r.destroy()"
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=_DISPLAY_PROBE_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        _display_probe = (False, f"创建 Tk 窗口超过 {_DISPLAY_PROBE_TIMEOUT:.0f}s，视为无可用显示")
+    except OSError as exc:  # pragma: no cover - 取决于环境
+        _display_probe = (False, f"无法启动探测子进程：{exc}")
+    else:
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip().splitlines()
+            _display_probe = (False, f"无可用显示：{detail[-1] if detail else '未知错误'}")
+        else:
+            _display_probe = (True, "")
+    return _display_probe
+
 
 def _get_app():
     global _app, _skip_reason
     if _app is not None:
         return _app
-    try:
-        root = tk.Tk()
-    except tk.TclError as exc:
-        _skip_reason = f"无可用显示：{exc}"
+
+    available, reason = _probe_display()
+    if not available:
+        _skip_reason = reason
         return None
-    root.withdraw()
+
     from netguard.gui.main_ui import NetGuardApp
 
     _app = NetGuardApp()
