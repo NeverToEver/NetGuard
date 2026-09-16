@@ -83,7 +83,7 @@ CI 与发布流程，并修正文档中长期存在的相互矛盾。
 
 ## [0.1.0]
 
-课程设计阶段的功能集：抓包引擎（ctypes 绑定 libpcap/Npcap/WinPcap）、
+首个功能完整版本：抓包引擎（ctypes 绑定 libpcap/Npcap/WinPcap）、
 离线 pcap 读写与回放、Ethernet→IPv4→TCP/UDP→HTTP/DNS/ICMP 解析、
 类 Snort 规则引擎（含重组流回退匹配）、跨包时间窗口检测器
 （SYN flood / 端口扫描 / DNS 隧道 / ICMP flood / 暴力破解）、
