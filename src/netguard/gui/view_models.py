@@ -41,4 +41,3 @@ def _format_packet(packet: PacketInfo) -> str:
         for issue in packet.issues:
             lines.append(f"  {issue.layer}: {issue.message}")
     return "\n".join(lines)
-

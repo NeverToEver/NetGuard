@@ -207,9 +207,11 @@ alert udp any any -> any 53 (content "example"; msg "检测到 DNS 查询关键�
 
 | 文件 | 说明 |
 | --- | --- |
-| `src/netguard/gui/main_ui.py` | `dark_mode` 保存开关状态 |
-| `src/netguard/gui/main_ui.py` | `_apply_theme()` 统一应用浅色/深色颜色配置 |
-| `src/netguard/gui/main_ui.py` | 固定 ttk 主题，只改颜色，避免切换时按钮尺寸和位置变化 |
+| `src/netguard/gui/main_ui.py` | `theme_mode` 保存 light/dark/system 模式，`_set_theme_mode()` 切换 |
+| `src/netguard/gui/theme.py` | `ThemeManager` + `build_colors()` 统一应用浅色/深色颜色配置 |
+| `src/netguard/gui/theme.py` | `detect_system_dark()` 支持"跟随系统"自动切换 |
+| `src/netguard/gui/main_ui.py` | 固定 ttk 主题（clam），只改颜色，避免切换时按钮尺寸和位置变化 |
+| `src/netguard/gui/config.py` | `resolve_theme_mode()` 归一化配置并兼容旧版 `dark_mode` |
 
 ## 9. 生成实验流量
 

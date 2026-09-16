@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict, deque
+from typing import Any
 
 from netguard.clock import Clock
 from netguard.detection.base import BaseDetector
@@ -12,7 +13,7 @@ _MAX_TRACKED_KEYS = 4096
 _MAX_SAMPLES_PER_KEY = 4096
 
 
-def _evict_oldest(events: dict, max_keys: int, *linked: dict) -> None:
+def _evict_oldest(events: dict[Any, Any], max_keys: int, *linked: dict[Any, Any]) -> None:
     """键数超上限时批量逐出最旧的 10%，避免每包 O(n) 的逐键 min 扫描。
 
     ``linked`` 里的字典（如 _alerted / _port_counts）与 events 按键同步删除。
@@ -381,8 +382,7 @@ class DnsTunnelDetector(BaseDetector):
                 alerts.append(
                     self._alert(
                         packet,
-                        f"疑似 DNS 隧道：{packet.src} 查询超长域名 {name[:80]}"
-                        f"（长度 {len(name)}，最长标签 {longest}）",
+                        f"疑似 DNS 隧道：{packet.src} 查询超长域名 {name[:80]}（长度 {len(name)}，最长标签 {longest}）",
                     )
                 )
                 continue

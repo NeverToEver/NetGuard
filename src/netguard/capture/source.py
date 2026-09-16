@@ -3,8 +3,8 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from netguard.capture.pcap import CaptureDevice, PcapBackend, RawPacket, create_backend
 from netguard.capture.pcap_file import PcapFileError, read_pcap
@@ -111,9 +111,7 @@ class CaptureSource:
         self._is_file_mode = True
         self._replay_finished.clear()
         self._stop.clear()
-        thread = threading.Thread(
-            target=self._file_worker, args=(str(path),), name="netguard-replay", daemon=True
-        )
+        thread = threading.Thread(target=self._file_worker, args=(str(path),), name="netguard-replay", daemon=True)
         self._threads = [thread]
         thread.start()
 

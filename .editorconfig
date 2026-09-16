@@ -1,0 +1,33 @@
+# 统一编辑器行为。与 .gitattributes 的分行符规则互补：
+# .gitattributes 管的是 git 侧的规范，这里管的是编辑器写入时的实际字节。
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.md]
+# Markdown 行尾两个空格是硬换行，不能裁剪
+trim_trailing_whitespace = false
+
+[*.{json,yml,yaml,toml,cfg,ini}]
+indent_size = 2
+
+# Windows 批处理/PowerShell 必须是 CRLF：LF 换行会让 cmd 误解析
+# if (...) 块并挂起（见 AGENTS.md）
+[*.{bat,cmd}]
+end_of_line = crlf
+
+[*.ps1]
+end_of_line = crlf
+
+# POSIX shell 必须是 LF：CRLF 会导致 bad interpreter
+[*.sh]
+end_of_line = lf
+
+[Makefile]
+indent_style = tab

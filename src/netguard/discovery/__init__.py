@@ -7,8 +7,8 @@ from netguard.discovery.subnet import (
     ping_host,
     ping_sweep,
     resolve_host,
-    resolve_hosts,
     resolve_hostname,
+    resolve_hosts,
     subnet_to_bpf,
 )
 
@@ -21,7 +21,7 @@ __all__ = [
     "ping_host",
     "ping_sweep",
     "resolve_host",
-    "resolve_hosts",
     "resolve_hostname",
+    "resolve_hosts",
     "subnet_to_bpf",
 ]

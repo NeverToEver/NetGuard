@@ -13,6 +13,7 @@
 
 除 ``--check`` / ``--setup`` / ``--no-run`` 外，其余参数原样转发给 ``main.py``。
 """
+
 from __future__ import annotations
 
 import os
@@ -119,24 +120,24 @@ def run_check() -> int:
         import netguard  # noqa: F401
 
         checks.append(("包导入", True, "import netguard 成功"))
-    except Exception as exc:  # noqa: BLE001 - 自检需要报告任何导入错误
+    except Exception as exc:
         checks.append(("包导入", False, str(exc)))
 
     try:
         ok, detail = _check_capture()
-    except Exception as exc:  # noqa: BLE001 - 自检需要报告任何后端错误
+    except Exception as exc:
         ok, detail = False, str(exc)
     checks.append(("抓包后端", ok, detail))
 
     try:
         ok, detail = _check_display()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         ok, detail = False, str(exc)
     checks.append(("图形界面", ok, detail))
 
     try:
         ok, detail = _check_rules()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         ok, detail = False, str(exc)
     checks.append(("IDS 规则", ok, detail))
 
@@ -178,8 +179,20 @@ def run_setup() -> int:
 
 
 def select_interpreter() -> Path:
-    """选择运行 main.py 的解释器：优先仓库内 .venv，否则用当前解释器。"""
+    """选择运行 main.py 的解释器。
+
+    优先级：NETGUARD_PYTHON 环境变量 > 仓库内 .venv > 当前解释器。
+    这是"用哪个 Python"的唯一权威实现；shell/batch 启动脚本只负责找到一个能
+    运行本脚本的解释器，版本下限（MIN_PYTHON）也在这里校验。
+    """
     current = Path(sys.executable)
+    override = os.environ.get("NETGUARD_PYTHON", "").strip()
+    if override:
+        override_path = Path(override).expanduser()
+        if not override_path.exists():
+            print(f"NETGUARD_PYTHON 指向的解释器不存在：{override_path}", file=sys.stderr)
+            return current
+        return override_path
     candidate = venv_python()
     if candidate.exists():
         try:

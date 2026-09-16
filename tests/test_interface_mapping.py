@@ -126,4 +126,4 @@ def test_decode_output_handles_empty_and_invalid() -> None:
     assert _decode_output(None) == ""
     assert _decode_output(b"") == ""
     # 纯 UTF-8 文本应正常解码
-    assert _decode_output("正常".encode("utf-8")) == "正常"
+    assert _decode_output("正常".encode()) == "正常"

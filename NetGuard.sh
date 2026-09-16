@@ -1,6 +1,10 @@
 #!/bin/sh
 # NetGuard 一键启动（Linux / macOS）。
-# 优先使用仓库内 .venv，其次 PATH 上的 python3；参数原样透传给 scripts/launch.py。
+# 本脚本只负责找到一个能运行 scripts/launch.py 的 Python，然后原样转交参数。
+# 解释器优先级、Python 版本下限、.venv 重入、环境自检全部由 launch.py 负责
+# （见 scripts/launch.py 的 select_interpreter / python_supported），
+# 避免在多份脚本里各写一遍版本判断。
+#
 #   ./NetGuard.sh                 启动 GUI
 #   ./NetGuard.sh --list-devices  列出网卡
 #   ./NetGuard.sh --check         仅环境自检
@@ -16,25 +20,21 @@ if [ ! -f "$LAUNCH" ]; then
     exit 1
 fi
 
-MIN_MAJOR=3
-MIN_MINOR=11
-
-version_ok() {
-    "$1" -c "import sys; raise SystemExit(0 if sys.version_info[:2] >= ($MIN_MAJOR, $MIN_MINOR) else 1)" >/dev/null 2>&1
-}
-
+# 依次尝试：NETGUARD_PYTHON → 仓库内 .venv → PATH 上的 python3 / python。
+# 不做版本判断：交给 launch.py，它会在版本过低时给出明确提示。
 PY=""
+if [ -n "${NETGUARD_PYTHON:-}" ] && [ -x "${NETGUARD_PYTHON}" ]; then
+    PY="$NETGUARD_PYTHON"
+fi
 
-# 1) 仓库内虚拟环境
-if [ -x "$PROJECT_DIR/.venv/bin/python" ] && version_ok "$PROJECT_DIR/.venv/bin/python"; then
+if [ -z "$PY" ] && [ -x "$PROJECT_DIR/.venv/bin/python" ]; then
     PY="$PROJECT_DIR/.venv/bin/python"
 fi
 
-# 2) PATH 上的 python3 / python
 if [ -z "$PY" ]; then
     for name in python3 python; do
         candidate="$(command -v "$name" 2>/dev/null || true)"
-        if [ -n "$candidate" ] && version_ok "$candidate"; then
+        if [ -n "$candidate" ]; then
             PY="$candidate"
             break
         fi
@@ -42,8 +42,8 @@ if [ -z "$PY" ]; then
 fi
 
 if [ -z "$PY" ]; then
-    echo "未找到可用的 Python $MIN_MAJOR.$MIN_MINOR+ 解释器。" >&2
-    echo "请安装 Python 后重试，或在项目根目录执行：" >&2
+    echo "未找到任何 Python 解释器。" >&2
+    echo "请安装 Python 3.11+ 后重试，或在项目根目录执行：" >&2
     echo "    python3 -m venv .venv" >&2
     echo "    ./.venv/bin/python -m pip install -e ." >&2
     exit 1

@@ -7,16 +7,17 @@
 from __future__ import annotations
 
 import struct
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Iterable, Iterator
+from typing import BinaryIO
 
 from netguard.capture.pcap import RawPacket
 
 # magic -> (字节序, 时间戳分辨率除数)
 _MAGICS: dict[bytes, tuple[str, int]] = {
-    b"\xd4\xc3\xb2\xa1": ("<", 1_000_000),   # 小端，微秒
-    b"\xa1\xb2\xc3\xd4": (">", 1_000_000),   # 大端，微秒
+    b"\xd4\xc3\xb2\xa1": ("<", 1_000_000),  # 小端，微秒
+    b"\xa1\xb2\xc3\xd4": (">", 1_000_000),  # 大端，微秒
     b"\x4d\x3c\xb2\xa1": ("<", 1_000_000_000),  # 小端，纳秒
     b"\xa1\xb2\x3c\x4d": (">", 1_000_000_000),  # 大端，纳秒
 }
@@ -49,9 +50,7 @@ def _parse_header(handle: BinaryIO) -> PcapFileHeader:
     rest = handle.read(20)
     if len(rest) < 20:
         raise PcapFileError("pcap 全局头被截断")
-    version_major, version_minor, _tz, _sigfigs, snaplen, linktype = struct.unpack(
-        f"{byte_order}HHiIII", rest
-    )
+    version_major, version_minor, _tz, _sigfigs, snaplen, linktype = struct.unpack(f"{byte_order}HHiIII", rest)
     return PcapFileHeader(
         byte_order=byte_order,
         nanosecond=divisor == 1_000_000_000,
@@ -79,8 +78,7 @@ def read_pcap(path: str | Path) -> Iterator[RawPacket]:
         header = _parse_header(handle)
         if header.linktype != _LINKTYPE_ETHERNET:
             raise PcapFileError(
-                f"不支持的链路类型 {header.linktype}（仅支持 Ethernet/DLT_EN10MB=1），"
-                "无法按以太网帧解析"
+                f"不支持的链路类型 {header.linktype}（仅支持 Ethernet/DLT_EN10MB=1），无法按以太网帧解析"
             )
         divisor = 1_000_000_000 if header.nanosecond else 1_000_000
         order = header.byte_order
@@ -130,7 +128,7 @@ def write_pcap(path: str | Path, packets: Iterable[RawPacket], *, nanosecond: bo
             # 负时间戳无法写入无符号字段；记录头声明的长度不能超过实际载荷，
             # 否则写出的文件自己读不回来（"pcap 包数据被截断"）
             ts_sec = max(0, int(packet.timestamp))
-            ts_frac = int(round((packet.timestamp - int(packet.timestamp)) * divisor))
+            ts_frac = round((packet.timestamp - int(packet.timestamp)) * divisor)
             if ts_frac >= divisor:
                 ts_sec += ts_frac // divisor
                 ts_frac %= divisor

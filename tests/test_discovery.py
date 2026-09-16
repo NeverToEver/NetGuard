@@ -11,10 +11,14 @@ from netguard.discovery.subnet import (
 
 
 def test_windows_device_match_is_one_directional():
+    adapter_two = (
+        "以太网适配器 以太网 2:\n\n   IPv4 地址 . . . . . . . . . . . . : 10.0.0.5\n"
+        "   子网掩码  . . . . . . . . . . . . : 255.255.255.0"
+    )
     sections = [
         "Windows IP 配置\n\n以太网适配器 以太网:\n\n   连接特定的 DNS 后缀 . . . . . . . . :\n"
         "   IPv4 地址 . . . . . . . . . . . . : 192.168.1.10\n   子网掩码  . . . . . . . . . . . . : 255.255.255.0",
-        "以太网适配器 以太网 2:\n\n   IPv4 地址 . . . . . . . . . . . . : 10.0.0.5\n   子网掩码  . . . . . . . . . . . . : 255.255.255.0",
+        adapter_two,
     ]
     # 候选 "以太网 2" 只应匹配自己的 section，不再反向匹配到 "以太网"
     assert _windows_device_matches(sections[1], "以太网 2")
@@ -33,7 +37,6 @@ def test_resolve_hosts_cancel_prevents_queued_work():
 
 
 def test_resolve_hosts_collects_results():
-    import concurrent.futures
 
     original = subnet_mod.resolve_host
     subnet_mod.resolve_host = lambda ip, timeout=2.0: HostInfo(ip=ip, hostname=f"host-{ip}")

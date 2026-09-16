@@ -82,6 +82,7 @@ def dns_packet(name: str, timestamp: float = 0.0, src: str = "10.0.0.1") -> Pack
 
 # --- Snort 冒号方言 ---
 
+
 def test_colon_option_syntax_is_supported() -> None:
     rule = parse_rule('alert tcp any any -> any 80 (content:"GET"; msg:"http get";)')
     assert rule.content == b"GET"
@@ -117,6 +118,7 @@ def test_snort_variable_is_rejected_loudly() -> None:
 
 # --- 不支持选项的可见提示 ---
 
+
 def test_unsupported_options_reported_but_rule_loads() -> None:
     issues: list[str] = []
     rule = parse_rule(
@@ -130,6 +132,7 @@ def test_unsupported_options_reported_but_rule_loads() -> None:
 
 
 # --- 端口与地址子集 ---
+
 
 def test_port_range_matches() -> None:
     engine = RuleEngine(['alert tcp any any -> any 80:90 (msg:"m";)'])
@@ -165,6 +168,7 @@ def test_address_list_matches() -> None:
 
 # --- nocase ---
 
+
 def test_nocase_matches_case_insensitively() -> None:
     payload = b"get / HTTP/1.1\r\n\r\n"
     with_nocase = RuleEngine(['alert tcp any any -> any 80 (content "GET"; nocase; msg:"m";)'])
@@ -175,6 +179,7 @@ def test_nocase_matches_case_insensitively() -> None:
 
 
 # --- 无会话协议的内容告警抑制 ---
+
 
 def test_udp_content_alerts_are_rate_limited_per_flow() -> None:
     engine = RuleEngine(['alert udp any any -> any 53 (content "example"; msg:"dns";)'])
@@ -194,10 +199,11 @@ def test_udp_content_alerts_are_rate_limited_per_flow() -> None:
 
 # --- DnsTunnel 修复 ---
 
+
 def test_dns_tunnel_long_name_alerts_are_suppressed_per_source() -> None:
     detector = DnsTunnelDetector(FakeClock(), max_name_length=40)
     total = []
-    for i in range(20):
+    for _ in range(20):
         total.extend(detector.observe(dns_packet(f"{'a' * 50}.example.com")))
     assert len(total) == 1
 
@@ -217,6 +223,7 @@ def test_threshold_greater_than_max_samples_is_rejected() -> None:
 
 
 # --- 建议引擎转义 ---
+
 
 def test_suggestion_content_backslash_neutralized() -> None:
     from netguard.rules.suggestions import _clean_option_text

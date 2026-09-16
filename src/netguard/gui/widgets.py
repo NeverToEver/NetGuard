@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import tkinter as tk
+from collections.abc import Callable
+from contextlib import suppress
 
 
 class Tooltip:
@@ -17,7 +19,7 @@ class Tooltip:
         *,
         delay_ms: int = 500,
         dark: bool = False,
-        dark_provider=None,
+        dark_provider: Callable[[], bool] | None = None,
     ) -> None:
         self.widget = widget
         self.text = text
@@ -32,16 +34,14 @@ class Tooltip:
         widget.bind("<Leave>", self._hide, add="+")
         widget.bind("<ButtonPress>", self._hide, add="+")
 
-    def _schedule(self, _event=None) -> None:
+    def _schedule(self, _event: tk.Event | None = None) -> None:
         self._cancel()
         self._after_id = self.widget.after(self.delay_ms, self._show)
 
     def _cancel(self) -> None:
         if self._after_id is not None:
-            try:
+            with suppress(tk.TclError):
                 self.widget.after_cancel(self._after_id)
-            except tk.TclError:
-                pass
             self._after_id = None
 
     def _show(self) -> None:
@@ -61,18 +61,22 @@ class Tooltip:
         dark = self.dark_provider() if self.dark_provider is not None else self.dark
         colors = build_colors(dark)
         label = tk.Label(
-            tip, text=self.text, justify=tk.LEFT,
-            background=colors["field_alt"], foreground=colors["text"],
-            relief=tk.SOLID, borderwidth=1, padx=6, pady=3,
+            tip,
+            text=self.text,
+            justify=tk.LEFT,
+            background=colors["field_alt"],
+            foreground=colors["text"],
+            relief=tk.SOLID,
+            borderwidth=1,
+            padx=6,
+            pady=3,
         )
         label.pack()
         self._tip = tip
 
-    def _hide(self, _event=None) -> None:
+    def _hide(self, _event: tk.Event | None = None) -> None:
         self._cancel()
         if self._tip is not None:
-            try:
+            with suppress(tk.TclError):
                 self._tip.destroy()
-            except tk.TclError:
-                pass
             self._tip = None

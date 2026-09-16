@@ -65,6 +65,7 @@ def dns_packet() -> PacketInfo:
 
 # --- Rule engine tests ---
 
+
 def test_rule_engine_matches_content_and_port() -> None:
     engine = RuleEngine(['alert tcp any any -> any 80 (content "GET"; msg "检测到 HTTP GET 请求";)'])
     alerts = engine.match(tcp_packet(1, b"GET / HTTP/1.1\r\n\r\n"))
@@ -135,9 +136,7 @@ def test_rule_engine_bidirectional_direction_matches_reverse_addresses() -> None
 
 
 def test_rule_engine_comments_are_ignored() -> None:
-    engine = RuleEngine(
-        ["# 这是一个注释", 'alert tcp any any -> any 80 (content "GET"; msg "测试";)']
-    )
+    engine = RuleEngine(["# 这是一个注释", 'alert tcp any any -> any 80 (content "GET"; msg "测试";)'])
     assert len(engine.rules) == 1
 
 
@@ -161,41 +160,54 @@ def test_rule_engine_content_in_raw_bytes() -> None:
     engine = RuleEngine(['alert tcp any any -> any any (content "secret"; msg "原始匹配";)'])
     pkt = tcp_packet(payload=b"")
     pkt = PacketInfo(
-        timestamp=1.0, length=60, raw=b"prefix secret suffix", protocol="TCP",
-        src="10.0.0.1", dst="10.0.0.2", src_port=1, dst_port=1,
-        summary="test", tcp={"sequence": 1, "flags": ["ACK"], "payload_length": 0},
+        timestamp=1.0,
+        length=60,
+        raw=b"prefix secret suffix",
+        protocol="TCP",
+        src="10.0.0.1",
+        dst="10.0.0.2",
+        src_port=1,
+        dst_port=1,
+        summary="test",
+        tcp={"sequence": 1, "flags": ["ACK"], "payload_length": 0},
     )
     alerts = engine.match(pkt)
     assert len(alerts) == 1
 
 
 def test_rule_engine_malformed_rule_skipped() -> None:
-    engine = RuleEngine([
-        "garbage line",
-        'alert tcp any any -> any 80 (content "GET"; msg "有效规则";)',
-        "another bad line without parentheses",
-    ])
+    engine = RuleEngine(
+        [
+            "garbage line",
+            'alert tcp any any -> any 80 (content "GET"; msg "有效规则";)',
+            "another bad line without parentheses",
+        ]
+    )
     assert len(engine.rules) == 1
     assert engine.rules[0].msg == "有效规则"
 
 
 def test_rule_engine_load_returns_failed_count() -> None:
     engine = RuleEngine()
-    failed = engine.load([
-        "garbage",
-        'alert tcp any any -> any 80 (content "GET"; msg "ok";)',
-        "more garbage",
-    ])
+    failed = engine.load(
+        [
+            "garbage",
+            'alert tcp any any -> any 80 (content "GET"; msg "ok";)',
+            "more garbage",
+        ]
+    )
     assert failed == 2
     assert len(engine.rules) == 1
 
 
 def test_rule_engine_non_alert_action_is_rejected() -> None:
     engine = RuleEngine()
-    failed = engine.load([
-        'drop tcp any any -> any 80 (content "GET"; msg "unsupported";)',
-        'alert tcp any any -> any 80 (content "GET"; msg "ok";)',
-    ])
+    failed = engine.load(
+        [
+            'drop tcp any any -> any 80 (content "GET"; msg "unsupported";)',
+            'alert tcp any any -> any 80 (content "GET"; msg "ok";)',
+        ]
+    )
 
     assert failed == 1
     assert len(engine.rules) == 1
@@ -211,6 +223,7 @@ def test_rule_engine_parses_semicolon_inside_quoted_option() -> None:
 
 
 # --- Session tracker tests ---
+
 
 def test_session_tracker_reassembles_out_of_order_fragments() -> None:
     tracker = SessionTracker(timeout_seconds=60)
@@ -305,9 +318,16 @@ def test_session_tracker_detects_multiple_http_messages_in_one_stream() -> None:
 def test_session_tracker_nontcp_returns_none() -> None:
     tracker = SessionTracker()
     pkt = PacketInfo(
-        timestamp=1.0, length=60, raw=b"", protocol="UDP",
-        src="10.0.0.1", dst="10.0.0.2", src_port=53, dst_port=53,
-        summary="dns", udp={"src_port": 53, "dst_port": 53, "length": 8, "checksum": 0},
+        timestamp=1.0,
+        length=60,
+        raw=b"",
+        protocol="UDP",
+        src="10.0.0.1",
+        dst="10.0.0.2",
+        src_port=53,
+        dst_port=53,
+        summary="dns",
+        udp={"src_port": 53, "dst_port": 53, "length": 8, "checksum": 0},
     )
     assert tracker.update(pkt) is None
 
@@ -326,11 +346,12 @@ def test_session_tracker_max_sessions_evicts_oldest() -> None:
     tracker.update(tcp_packet(timestamp=1.0, src="10.0.0.1", dst="10.0.0.2"))
     tracker.update(tcp_packet(timestamp=2.0, src="10.0.0.3", dst="10.0.0.4"))
     assert len(tracker.sessions) == 1
-    remaining = list(tracker.sessions.keys())[0]
+    remaining = next(iter(tracker.sessions.keys()))
     assert remaining[0] == "10.0.0.3"
 
 
 # --- Traffic stats tests ---
+
 
 def test_traffic_stats_snapshot() -> None:
     stats = TrafficStats()
@@ -372,9 +393,16 @@ def test_traffic_stats_protocol_counts_capped() -> None:
     stats = TrafficStats(max_protocols=2)
     for proto in ["A", "B", "C", "D"]:
         pkt = PacketInfo(
-            timestamp=1.0, length=10, raw=b"", protocol=proto,
-            src="1.2.3.4", dst="5.6.7.8", src_port=1, dst_port=2,
-            summary="", tcp={"sequence": 1, "flags": ["ACK"], "payload_length": 0},
+            timestamp=1.0,
+            length=10,
+            raw=b"",
+            protocol=proto,
+            src="1.2.3.4",
+            dst="5.6.7.8",
+            src_port=1,
+            dst_port=2,
+            summary="",
+            tcp={"sequence": 1, "flags": ["ACK"], "payload_length": 0},
         )
         stats.update(pkt)
     snap = stats.snapshot()
@@ -382,6 +410,7 @@ def test_traffic_stats_protocol_counts_capped() -> None:
 
 
 # --- 会话重组流检测（防拆包/分片绕过） ---
+
 
 def test_stream_match_detects_keyword_split_across_segments() -> None:
     engine = RuleEngine(['alert tcp any any -> any any (content "administrator"; msg "检测到敏感关键字";)'])
@@ -415,12 +444,19 @@ def test_stream_match_alerts_only_once_per_session() -> None:
 
 # --- 回归：规则引擎二级端口索引与会话级 content 去重 ---
 
+
 def test_port_index_keeps_only_relevant_candidates() -> None:
     rules = [f'alert tcp any any -> any {1000 + i} (msg "r{i}";)' for i in range(200)]
     engine = RuleEngine(rules)
     packet = PacketInfo(
-        timestamp=1.0, length=54, raw=b"", protocol="TCP",
-        src="10.0.0.1", dst="10.0.0.2", src_port=40000, dst_port=1050,
+        timestamp=1.0,
+        length=54,
+        raw=b"",
+        protocol="TCP",
+        src="10.0.0.1",
+        dst="10.0.0.2",
+        src_port=40000,
+        dst_port=1050,
     )
     # 应只命中 1050 一条，且候选集大幅缩小（内部验证索引生效）
     alerts = engine.match(packet)
@@ -433,13 +469,25 @@ def test_port_index_keeps_only_relevant_candidates() -> None:
 def test_port_index_bidirectional_rules_still_match() -> None:
     engine = RuleEngine(['alert tcp any 80 <> any any (msg "bidir";)'])
     packet = PacketInfo(
-        timestamp=1.0, length=54, raw=b"", protocol="TCP",
-        src="10.0.0.1", dst="10.0.0.2", src_port=40000, dst_port=80,
+        timestamp=1.0,
+        length=54,
+        raw=b"",
+        protocol="TCP",
+        src="10.0.0.1",
+        dst="10.0.0.2",
+        src_port=40000,
+        dst_port=80,
     )
     assert len(engine.match(packet)) == 1
     reverse = PacketInfo(
-        timestamp=1.0, length=54, raw=b"", protocol="TCP",
-        src="10.0.0.2", dst="10.0.0.1", src_port=80, dst_port=40000,
+        timestamp=1.0,
+        length=54,
+        raw=b"",
+        protocol="TCP",
+        src="10.0.0.2",
+        dst="10.0.0.1",
+        src_port=80,
+        dst_port=40000,
     )
     assert len(engine.match(reverse)) == 1
 
@@ -450,8 +498,14 @@ def test_single_packet_content_alerts_deduped_per_session() -> None:
 
     def make_packet() -> PacketInfo:
         return PacketInfo(
-            timestamp=1.0, length=54, raw=b"", protocol="TCP",
-            src="10.0.0.1", dst="10.0.0.2", src_port=40000, dst_port=80,
+            timestamp=1.0,
+            length=54,
+            raw=b"",
+            protocol="TCP",
+            src="10.0.0.1",
+            dst="10.0.0.2",
+            src_port=40000,
+            dst_port=80,
             payload=b"GET / HTTP/1.1\r\n\r\n",
         )
 
@@ -462,8 +516,10 @@ def test_single_packet_content_alerts_deduped_per_session() -> None:
 
 # --- 回归：离线回放（历史时间戳）下的会话清理与速率 ---
 
+
 def test_stats_snapshot_uses_packet_timeline_for_replay() -> None:
     """回放旧 pcap（包时间戳远早于墙钟）时，速率窗口不被墙钟清空。"""
+
     class FakeClock:
         def __call__(self) -> float:
             return 1_800_000_000.0  # 墙钟在“未来”
@@ -479,6 +535,7 @@ def test_stats_snapshot_uses_packet_timeline_for_replay() -> None:
 
 def test_stats_snapshot_idle_returns_zero_rate() -> None:
     """实时抓包语义：包时间戳等于墙钟，空闲超过窗口后速率归零。"""
+
     class FakeClock:
         value = 1_000_000.0
 
@@ -499,9 +556,10 @@ def test_stats_snapshot_idle_returns_zero_rate() -> None:
 
 def test_session_cleanup_after_fin_uses_packet_timestamp() -> None:
     """离线回放：FIN 触发的清理不能用墙钟，否则全部存活会话被误删。"""
-    from netguard.processing import PacketProcessor
-    from netguard.capture.pcap import RawPacket
     import struct
+
+    from netguard.capture.pcap import RawPacket
+    from netguard.processing import PacketProcessor
 
     class FakeClock:
         def __call__(self) -> float:
@@ -524,8 +582,12 @@ def test_session_cleanup_after_fin_uses_packet_timestamp() -> None:
     processor.process(RawPacket(ts + 1, tcp_frame(a, b, 40001, 80, 0x01), 54, 54))
     # 第二条会话必须仍然存活（不能用墙钟判定超时）
     remaining = list(processor.sessions.sessions.keys())
-    assert (str(__import__("ipaddress").IPv4Address(a)), 40002,
-            str(__import__("ipaddress").IPv4Address(b)), 81) in remaining
+    assert (
+        str(__import__("ipaddress").IPv4Address(a)),
+        40002,
+        str(__import__("ipaddress").IPv4Address(b)),
+        81,
+    ) in remaining
 
 
 # --- 阶段6 回归：碎片字节预算 / 批量淘汰 / stats 有界窗口 ---

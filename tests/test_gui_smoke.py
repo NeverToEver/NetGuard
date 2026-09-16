@@ -3,6 +3,7 @@
 一个进程内反复创建/销毁 Tk 根窗口会让 Tcl 解释器失效，因此这里用模块级
 单例窗口，每个用例只重置状态、不重建窗口。
 """
+
 from __future__ import annotations
 
 import queue
@@ -119,6 +120,29 @@ def test_theme_switching_updates_dark_flag(app) -> None:
     app._set_theme_mode("system")
 
 
+def test_theme_switch_with_existing_alert_rows(app) -> None:
+    """告警列表非空时切换主题不得抛错。
+
+    回归用例：_refresh_alert_colors 曾用 Listbox.get(index, index)，该双参数
+    形式返回元组，会把元组喂给 severity_color 触发 AttributeError；异常类型
+    不在 except tk.TclError 覆盖范围内，直接冒泡中断主题切换。
+    """
+    app.alerts_placeholder = False
+    app.alerts.delete(0, "end")
+    app.alerts.insert("end", "[严重] 疑似 SYN Flood：5s 内 120 个 SYN")
+    app.alerts.insert("end", "检测到 HTTP GET 请求")
+
+    app._set_theme_mode("dark")
+    assert app.alerts.size() == 2
+    app._set_theme_mode("light")
+
+    # 每行前景色应已按严重度刷新为具体颜色
+    assert app.alerts.itemcget(0, "fg")
+
+    app.alerts.delete(0, "end")
+    app._set_theme_mode("system")
+
+
 def test_night_mode_toggle_overrides_system(app) -> None:
     """工具栏「夜间模式」开关必须真正改变主题，而不是被 _apply_theme 还原。"""
     app._set_theme_mode("system")
@@ -150,9 +174,15 @@ def test_refilter_batches_without_blocking(app) -> None:
     app.events = [
         PacketEvent(
             PacketInfo(
-                timestamp=float(i), length=60, raw=b"GET / HTTP/1.1\r\n\r\n",
-                protocol="HTTP", src="10.0.0.1", dst="10.0.0.2",
-                src_port=1, dst_port=80, summary="GET",
+                timestamp=float(i),
+                length=60,
+                raw=b"GET / HTTP/1.1\r\n\r\n",
+                protocol="HTTP",
+                src="10.0.0.1",
+                dst="10.0.0.2",
+                src_port=1,
+                dst_port=80,
+                summary="GET",
             ),
             (),
         )
@@ -183,8 +213,9 @@ def test_background_helper_reports_failure(app, monkeypatch) -> None:
     from netguard.gui import main_ui
 
     captured = {}
-    monkeypatch.setattr(main_ui.messagebox, "showerror",
-                        lambda title, message, **kw: captured.update(title=title, message=message))
+    monkeypatch.setattr(
+        main_ui.messagebox, "showerror", lambda title, message, **kw: captured.update(title=title, message=message)
+    )
 
     def boom():
         raise ValueError("nope")

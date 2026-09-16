@@ -68,8 +68,7 @@ def build_colors(dark: bool) -> dict[str, str]:
 STATUS_COLORS = {"capturing": "success", "paused": "warning", "idle": "muted"}
 
 #: 告警关键字 → 严重度颜色键
-_SEVERITY_HIGH = ("attack", "overflow", "injection", "exploit", "trojan", "malware",
-                  "flood", "scan", "brute", "spoof")
+_SEVERITY_HIGH = ("attack", "overflow", "injection", "exploit", "trojan", "malware", "flood", "scan", "brute", "spoof")
 _SEVERITY_MEDIUM = ("suspicious", "policy", "anomaly", "attempt", "tunnel")
 
 
@@ -103,13 +102,17 @@ def detect_system_dark() -> bool:
         if system == "darwin":
             result = subprocess.run(
                 ["defaults", "read", "-g", "AppleInterfaceStyle"],
-                capture_output=True, text=True, timeout=2,
+                capture_output=True,
+                text=True,
+                timeout=2,
             )
             return "dark" in result.stdout.lower()
         if system == "linux":
             result = subprocess.run(
                 ["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"],
-                capture_output=True, text=True, timeout=2,
+                capture_output=True,
+                text=True,
+                timeout=2,
             )
             return "dark" in result.stdout.lower()
     except Exception:
@@ -167,15 +170,24 @@ class ThemeManager:
         self._font_mono.configure(family=mono, size=13)
 
     @property
-    def font_body(self) -> tkfont.Font: return self._font_body
+    def font_body(self) -> tkfont.Font:
+        return self._font_body
+
     @property
-    def font_text(self) -> tkfont.Font: return self._font_text
+    def font_text(self) -> tkfont.Font:
+        return self._font_text
+
     @property
-    def font_mono(self) -> tkfont.Font: return self._font_mono
+    def font_mono(self) -> tkfont.Font:
+        return self._font_mono
+
     @property
-    def font_heading(self) -> tkfont.Font: return self._font_heading
+    def font_heading(self) -> tkfont.Font:
+        return self._font_heading
+
     @property
-    def font_small(self) -> tkfont.Font: return self._font_small
+    def font_small(self) -> tkfont.Font:
+        return self._font_small
 
     def theme_use(self, theme_name: str) -> None:
         self._style.theme_use(theme_name)
@@ -184,11 +196,16 @@ class ThemeManager:
         supported = set(widget.keys())
         is_text = isinstance(widget, tk.Text)
         options = {
-            "background": colors["field"], "foreground": colors["text"],
-            "insertbackground": colors["text"], "selectbackground": colors["select"],
+            "background": colors["field"],
+            "foreground": colors["text"],
+            "insertbackground": colors["text"],
+            "selectbackground": colors["select"],
             "selectforeground": colors["select_text"],
-            "highlightbackground": colors["border"], "highlightcolor": colors["accent"],
-            "highlightthickness": 1, "relief": tk.FLAT, "borderwidth": 0,
+            "highlightbackground": colors["border"],
+            "highlightcolor": colors["accent"],
+            "highlightthickness": 1,
+            "relief": tk.FLAT,
+            "borderwidth": 0,
             "font": self._font_mono if is_text else self._font_body,
         }
         widget.configure(**{key: value for key, value in options.items() if key in supported})
@@ -204,10 +221,15 @@ class ThemeManager:
         app.option_add("*TCombobox*Listbox.selectBackground", colors["select"])
         app.option_add("*TCombobox*Listbox.selectForeground", colors["select_text"])
         style.configure(
-            ".", background=colors["bg"], foreground=colors["text"],
-            fieldbackground=colors["field"], bordercolor=colors["border"],
-            lightcolor=colors["border"], darkcolor=colors["border"],
-            troughcolor=colors["field"], font=self._font_body,
+            ".",
+            background=colors["bg"],
+            foreground=colors["text"],
+            fieldbackground=colors["field"],
+            bordercolor=colors["border"],
+            lightcolor=colors["border"],
+            darkcolor=colors["border"],
+            troughcolor=colors["field"],
+            font=self._font_body,
         )
         style.configure("TFrame", background=colors["bg"])
         style.configure("Toolbar.TFrame", background=colors["toolbar"])
@@ -215,49 +237,134 @@ class ThemeManager:
         style.configure("Summary.TFrame", background=colors["summary"])
         style.configure("Panel.TFrame", background=colors["panel"])
         style.configure("Content.TPanedwindow", background=colors["bg"])
-        style.configure("TLabelframe", background=colors["panel"], foreground=colors["text"],
-                        bordercolor=colors["border"], relief=tk.SOLID)
-        style.configure("TLabelframe.Label", background=colors["panel"], foreground=colors["muted"],
-                        font=self._font_heading)
+        style.configure(
+            "TLabelframe",
+            background=colors["panel"],
+            foreground=colors["text"],
+            bordercolor=colors["border"],
+            relief=tk.SOLID,
+        )
+        style.configure(
+            "TLabelframe.Label", background=colors["panel"], foreground=colors["muted"], font=self._font_heading
+        )
         style.configure("TLabel", background=colors["bg"], foreground=colors["text"])
         style.configure("Muted.TLabel", background=colors["toolbar"], foreground=colors["muted"], font=self._font_small)
-        style.configure("AppTitle.TLabel", background=colors["toolbar"], foreground=colors["text"], font=self._font_heading)
-        style.configure("FilterLabel.TLabel", background=colors["filter"], foreground=colors["text"], font=self._font_small)
-        style.configure("Metric.TLabel", background=colors["summary"], foreground=colors["muted"], font=self._font_small)
-        style.configure("Status.TLabel", background=colors["toolbar"], foreground=colors["success"], font=self._font_small)
-        style.configure("TButton", background=colors["button"], foreground=colors["text"],
-                        bordercolor=colors["border"], focusthickness=2, focuscolor=colors["focus"], padding=(10, 5))
-        style.map("TButton", background=[("pressed", colors["field"]), ("active", colors["button_active"])],
-                  foreground=[("disabled", colors["muted"])])
-        style.configure("Secondary.TButton", background=colors["button"], foreground=colors["text"],
-                        bordercolor=colors["border"], padding=(10, 5))
+        style.configure(
+            "AppTitle.TLabel", background=colors["toolbar"], foreground=colors["text"], font=self._font_heading
+        )
+        style.configure(
+            "FilterLabel.TLabel", background=colors["filter"], foreground=colors["text"], font=self._font_small
+        )
+        style.configure(
+            "Metric.TLabel", background=colors["summary"], foreground=colors["muted"], font=self._font_small
+        )
+        style.configure(
+            "Status.TLabel", background=colors["toolbar"], foreground=colors["success"], font=self._font_small
+        )
+        style.configure(
+            "TButton",
+            background=colors["button"],
+            foreground=colors["text"],
+            bordercolor=colors["border"],
+            focusthickness=2,
+            focuscolor=colors["focus"],
+            padding=(10, 5),
+        )
+        style.map(
+            "TButton",
+            background=[("pressed", colors["field"]), ("active", colors["button_active"])],
+            foreground=[("disabled", colors["muted"])],
+        )
+        style.configure(
+            "Secondary.TButton",
+            background=colors["button"],
+            foreground=colors["text"],
+            bordercolor=colors["border"],
+            padding=(10, 5),
+        )
         style.map("Secondary.TButton", background=[("pressed", colors["field"]), ("active", colors["button_active"])])
-        style.configure("Accent.TButton", background=colors["accent"], foreground=colors["accent_text"],
-                        bordercolor=colors["accent"], padding=(10, 5))
-        style.map("Accent.TButton", background=[("pressed", colors["accent_active"]), ("active", colors["accent_active"])])
-        style.configure("Danger.TButton", background=colors["danger"], foreground=colors["accent_text"],
-                        bordercolor=colors["danger"], padding=(10, 5))
-        style.map("Danger.TButton", background=[("pressed", colors["danger_active"]), ("active", colors["danger_active"])])
+        style.configure(
+            "Accent.TButton",
+            background=colors["accent"],
+            foreground=colors["accent_text"],
+            bordercolor=colors["accent"],
+            padding=(10, 5),
+        )
+        style.map(
+            "Accent.TButton", background=[("pressed", colors["accent_active"]), ("active", colors["accent_active"])]
+        )
+        style.configure(
+            "Danger.TButton",
+            background=colors["danger"],
+            foreground=colors["accent_text"],
+            bordercolor=colors["danger"],
+            padding=(10, 5),
+        )
+        style.map(
+            "Danger.TButton", background=[("pressed", colors["danger_active"]), ("active", colors["danger_active"])]
+        )
         style.configure("TCheckbutton", background=colors["bg"], foreground=colors["text"])
-        style.configure("Switch.TCheckbutton", background=colors["toolbar"], foreground=colors["text"], font=self._font_small)
-        style.map("TCheckbutton", background=[("active", colors["bg"])],
-                  foreground=[("active", colors["text"]), ("disabled", colors["muted"])],
-                  indicatorcolor=[("selected", colors["accent"]), ("!selected", colors["field"])])
-        style.map("Switch.TCheckbutton", background=[("active", colors["toolbar"])], foreground=[("active", colors["text"])])
-        style.configure("TEntry", fieldbackground=colors["field"], foreground=colors["text"],
-                        insertcolor=colors["text"], bordercolor=colors["border"], padding=(6, 4))
-        style.configure("Filter.TEntry", fieldbackground=colors["field"], foreground=colors["text"],
-                        insertcolor=colors["text"], bordercolor=colors["accent"], padding=(7, 4))
-        style.configure("TCombobox", fieldbackground=colors["field"], foreground=colors["text"],
-                        arrowcolor=colors["muted"], bordercolor=colors["border"], padding=(6, 4))
-        style.map("TCombobox", fieldbackground=[("readonly", colors["field"]), ("active", colors["field_alt"])],
-                  foreground=[("readonly", colors["text"])])
-        style.configure("Treeview", background=colors["field"], foreground=colors["text"],
-                        fieldbackground=colors["field"], bordercolor=colors["border"], rowheight=32, font=self._font_body)
-        style.configure("Treeview.Heading", background=colors["field_alt"], foreground=colors["muted"],
-                        bordercolor=colors["border"], font=self._font_heading, padding=(6, 5))
-        style.map("Treeview", background=[("selected", colors["select"])],
-                  foreground=[("selected", colors["select_text"])])
+        style.configure(
+            "Switch.TCheckbutton", background=colors["toolbar"], foreground=colors["text"], font=self._font_small
+        )
+        style.map(
+            "TCheckbutton",
+            background=[("active", colors["bg"])],
+            foreground=[("active", colors["text"]), ("disabled", colors["muted"])],
+            indicatorcolor=[("selected", colors["accent"]), ("!selected", colors["field"])],
+        )
+        style.map(
+            "Switch.TCheckbutton", background=[("active", colors["toolbar"])], foreground=[("active", colors["text"])]
+        )
+        style.configure(
+            "TEntry",
+            fieldbackground=colors["field"],
+            foreground=colors["text"],
+            insertcolor=colors["text"],
+            bordercolor=colors["border"],
+            padding=(6, 4),
+        )
+        style.configure(
+            "Filter.TEntry",
+            fieldbackground=colors["field"],
+            foreground=colors["text"],
+            insertcolor=colors["text"],
+            bordercolor=colors["accent"],
+            padding=(7, 4),
+        )
+        style.configure(
+            "TCombobox",
+            fieldbackground=colors["field"],
+            foreground=colors["text"],
+            arrowcolor=colors["muted"],
+            bordercolor=colors["border"],
+            padding=(6, 4),
+        )
+        style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", colors["field"]), ("active", colors["field_alt"])],
+            foreground=[("readonly", colors["text"])],
+        )
+        style.configure(
+            "Treeview",
+            background=colors["field"],
+            foreground=colors["text"],
+            fieldbackground=colors["field"],
+            bordercolor=colors["border"],
+            rowheight=32,
+            font=self._font_body,
+        )
+        style.configure(
+            "Treeview.Heading",
+            background=colors["field_alt"],
+            foreground=colors["muted"],
+            bordercolor=colors["border"],
+            font=self._font_heading,
+            padding=(6, 5),
+        )
+        style.map(
+            "Treeview", background=[("selected", colors["select"])], foreground=[("selected", colors["select_text"])]
+        )
         style.map("Treeview.Heading", background=[("active", colors["button_active"])])
         table.tag_configure("odd", background=colors["field"])
         table.tag_configure("even", background=colors["field_alt"])

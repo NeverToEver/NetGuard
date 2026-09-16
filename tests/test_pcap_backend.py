@@ -7,6 +7,7 @@ BPF 过滤（长度上限、编译失败路径）、抓包循环（正常回调/
 from __future__ import annotations
 
 import ctypes
+import itertools
 from unittest.mock import MagicMock
 
 import pytest
@@ -16,14 +17,12 @@ from netguard.capture.pcap import (
     PcapBackend,
     PcapError,
     RawPacket,
-    bpf_program,
     pcap_pkthdr,
 )
 
 
 def _make_lib() -> MagicMock:
-    lib = MagicMock(spec=pcap_mod.PcapBackend._REQUIRED_SYMBOLS)
-    return lib
+    return MagicMock(spec=pcap_mod.PcapBackend._REQUIRED_SYMBOLS)
 
 
 def _backend() -> PcapBackend:
@@ -230,7 +229,7 @@ class TestClose:
 class TestKernelDropStats:
     def test_kernel_drops_reported_via_hook(self):
         """pcap_stats 采样的内核丢弃经 on_kernel_drop 上报。"""
-        lib = MagicMock(spec=list(PcapBackend._REQUIRED_SYMBOLS) + ["pcap_stats"])
+        lib = MagicMock(spec=[*PcapBackend._REQUIRED_SYMBOLS, "pcap_stats"])
         lib.pcap_open_live.return_value = 1234
         lib.pcap_geterr.return_value = b""
 
@@ -248,9 +247,7 @@ class TestKernelDropStats:
             ctypes.cast(header_ptr, ctypes.POINTER(ctypes.c_void_p))[0] = ctypes.cast(
                 ctypes.pointer(header), ctypes.c_void_p
             )
-            ctypes.cast(packet_ptr, ctypes.POINTER(ctypes.c_void_p))[0] = ctypes.cast(
-                buf, ctypes.c_void_p
-            )
+            ctypes.cast(packet_ptr, ctypes.POINTER(ctypes.c_void_p))[0] = ctypes.cast(buf, ctypes.c_void_p)
             return -2 if state["calls"] > 200 else 1
 
         lib.pcap_next_ex.side_effect = next_ex
@@ -297,19 +294,18 @@ class TestAddressPairing:
                 item.netmask = ctypes.cast(ctypes.pointer(sm), ctypes.POINTER(pcap_mod.sockaddr))
             addrs.append((item, sa, sm if mask is not None else None))
 
-        for (item, _, _), (next_item, _, _) in zip(addrs, addrs[1:]):
+        for (item, _, _), (next_item, _, _) in itertools.pairwise(addrs):
             item.next = ctypes.pointer(next_item)
 
         dev = pcap_mod.pcap_if_t()
         dev.name = b"eth0"
-        dev.addresses = (
-            ctypes.cast(ctypes.pointer(addrs[0][0]), ctypes.c_void_p) if addrs else None
-        )
-        keepalive = [obj for triplet in addrs for obj in triplet if obj is not None]
-        return dev, keepalive
+        dev.addresses = ctypes.cast(ctypes.pointer(addrs[0][0]), ctypes.c_void_p) if addrs else None
+        # 返回值第二项用于持有 ctypes 对象引用，防止被 GC 回收
+        _keepalive = [obj for triplet in addrs for obj in triplet if obj is not None]
+        return dev, _keepalive
 
     def test_missing_netmask_keeps_pairing_aligned(self):
-        dev, keepalive = self._make_addr_chain(
+        dev, _keepalive = self._make_addr_chain(
             [
                 (b"\x0a\x00\x00\x01", b"\xff\xff\xff\x00"),
                 (b"\xc0\xa8\x01\x01", None),
@@ -321,7 +317,7 @@ class TestAddressPairing:
         assert masks == ["255.255.255.0", "255.255.255.0"]
 
     def test_single_address_without_mask(self):
-        dev, keepalive = self._make_addr_chain([(b"\x0a\x00\x00\x02", None)])
+        dev, _keepalive = self._make_addr_chain([(b"\x0a\x00\x00\x02", None)])
         ips, masks = pcap_mod._extract_device_addresses(dev)
         assert ips == ["10.0.0.2"]
         assert masks == ["255.255.255.0"]

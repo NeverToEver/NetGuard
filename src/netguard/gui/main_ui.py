@@ -9,11 +9,13 @@ import sys
 import threading
 import time
 import tkinter as tk
-from contextlib import ExitStack
+from collections.abc import Callable
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass
+from functools import partial
 from importlib import resources
 from tkinter import filedialog, messagebox, ttk
-from typing import Callable
+from typing import Any, TypeVar, cast
 
 from netguard.capture.interface_mapping import (
     DeviceDisplay,
@@ -21,8 +23,19 @@ from netguard.capture.interface_mapping import (
     device_recommendation_reason,
     recommend_device_display,
 )
-from netguard.capture.pcap import RawPacket
+from netguard.capture.pcap import CaptureDevice, RawPacket
 from netguard.capture.pcap_file import write_pcap
+from netguard.discovery import (
+    MAX_SWEEP_HOSTS,
+    HostInfo,
+    SubnetInfo,
+    detect_subnet_os_fallback,
+    extract_subnets,
+    ping_host,
+    ping_sweep,
+    resolve_hosts,
+    subnet_to_bpf,
+)
 from netguard.gui.config import AppConfig, resolve_theme_mode
 from netguard.gui.theme import (
     ThemeManager,
@@ -38,9 +51,10 @@ from netguard.parser.packet import PacketInfo, hex_dump
 from netguard.pipeline import PacketEvent, PacketPipeline, PipelineStatus
 from netguard.rules.suggestions import RuleSuggestion, generate_rule_suggestions
 from netguard.trafficgen import TEMPLATES, PacketTemplate, TrafficGenerator
-from netguard.discovery import (MAX_SWEEP_HOSTS, HostInfo, SubnetInfo, detect_subnet_os_fallback, extract_subnets, ping_host, ping_sweep, resolve_hosts, subnet_to_bpf)
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 MAX_TABLE_ROWS = 5000
 MAX_ALERT_ROWS = 1000
 MAX_EVENTS = 50_000
@@ -65,7 +79,6 @@ SHORTCUTS: list[tuple[str, str, str]] = [
     ("退出", "Ctrl+Q", "<Control-q>"),
     ("快捷键说明", "F1", "<F1>"),
 ]
-
 
 
 def _sort_key(value: str) -> float:
@@ -105,24 +118,47 @@ DISPLAY_FILTER_TEMPLATES = [
 ]
 
 IDS_RULE_TEMPLATES = [
-    InputTemplate("HTTP GET 告警", "匹配发往 80 端口且载荷包含 GET 的明文 HTTP 请求。", 'alert tcp any any -> any 80 (content "GET"; msg "检测到 HTTP GET 请求";)'),
-    InputTemplate("HTTP POST 告警", "匹配发往 80 端口且载荷包含 POST 的明文 HTTP 请求。", 'alert tcp any any -> any 80 (content "POST"; msg "检测到 HTTP POST 请求";)'),
-    InputTemplate("HTTP Host 告警", "将 example.com 替换为目标 Host 域名。", 'alert tcp any any -> any 80 (content "Host: example.com"; msg "检测到指定 HTTP Host";)'),
-    InputTemplate("DNS 流量告警", "匹配普通 DNS 查询和响应流量。", 'alert udp any any -> any 53 (msg "检测到 DNS 流量";)'),
-    InputTemplate("DNS 关键字告警", "将 example 替换为目标域名中的关键字。", 'alert udp any any -> any 53 (content "example"; msg "检测到 DNS 查询关键字";)'),
-    InputTemplate("任意协议关键字", "将 secret 替换为需要在载荷中查找的关键字。", 'alert any any any -> any any (content "secret"; msg "检测到关键字 secret";)'),
+    InputTemplate(
+        "HTTP GET 告警",
+        "匹配发往 80 端口且载荷包含 GET 的明文 HTTP 请求。",
+        'alert tcp any any -> any 80 (content "GET"; msg "检测到 HTTP GET 请求";)',
+    ),
+    InputTemplate(
+        "HTTP POST 告警",
+        "匹配发往 80 端口且载荷包含 POST 的明文 HTTP 请求。",
+        'alert tcp any any -> any 80 (content "POST"; msg "检测到 HTTP POST 请求";)',
+    ),
+    InputTemplate(
+        "HTTP Host 告警",
+        "将 example.com 替换为目标 Host 域名。",
+        'alert tcp any any -> any 80 (content "Host: example.com"; msg "检测到指定 HTTP Host";)',
+    ),
+    InputTemplate(
+        "DNS 流量告警", "匹配普通 DNS 查询和响应流量。", 'alert udp any any -> any 53 (msg "检测到 DNS 流量";)'
+    ),
+    InputTemplate(
+        "DNS 关键字告警",
+        "将 example 替换为目标域名中的关键字。",
+        'alert udp any any -> any 53 (content "example"; msg "检测到 DNS 查询关键字";)',
+    ),
+    InputTemplate(
+        "任意协议关键字",
+        "将 secret 替换为需要在载荷中查找的关键字。",
+        'alert any any any -> any any (content "secret"; msg "检测到关键字 secret";)',
+    ),
 ]
 
 
 def _fit_combobox_width(combo: ttk.Combobox, values: list[str], *, min_width: int = 20, max_width: int = 70) -> None:
     if not values:
         return
-    max_chars = max((len(v) for v in values))
+    max_chars = max(len(v) for v in values)
     combo["width"] = max(min_width, min(max_chars, max_width))
 
 
-def _set_initial_window_size(window: tk.Toplevel | tk.Tk, width: int, height: int,
-                             min_width: int, min_height: int) -> None:
+def _set_initial_window_size(
+    window: tk.Toplevel | tk.Tk, width: int, height: int, min_width: int, min_height: int
+) -> None:
     screen_width = max(1, window.winfo_screenwidth())
     screen_height = max(1, window.winfo_screenheight())
     target_width = min(max(width, min_width), max(min_width, int(screen_width * 0.92)))
@@ -133,8 +169,9 @@ def _set_initial_window_size(window: tk.Toplevel | tk.Tk, width: int, height: in
     window.minsize(min_width, min_height)
 
 
-def center_on_parent(window: tk.Toplevel, parent: tk.Misc, width: int, height: int,
-                     min_width: int, min_height: int) -> None:
+def center_on_parent(
+    window: tk.Toplevel, parent: tk.Misc, width: int, height: int, min_width: int, min_height: int
+) -> None:
     """按父窗口居中并钳制到屏幕范围，符合对话框的常见惯例。"""
     try:
         parent.update_idletasks()
@@ -156,19 +193,20 @@ def center_on_parent(window: tk.Toplevel, parent: tk.Misc, width: int, height: i
     window.minsize(min_width, min_height)
 
 
-def bind_dialog_keys(window: tk.Toplevel, on_cancel: Callable[[], None],
-                     on_default: Callable[[], None] | None = None) -> None:
+def bind_dialog_keys(
+    window: tk.Toplevel, on_cancel: Callable[[], None], on_default: Callable[[], None] | None = None
+) -> None:
     """为对话框绑定 Esc 取消与可选的回车默认动作。"""
     window.bind("<Escape>", lambda _e: on_cancel())
     if on_default is not None:
         window.bind("<Return>", lambda _e: on_default())
 
 
-def wire_dialog_theme(dialog: tk.Toplevel, parent: tk.Misc, classic_widgets: list[tk.Widget]) -> None:
+def wire_dialog_theme(dialog: tk.Toplevel, parent: NetGuardApp, classic_widgets: list[tk.Widget]) -> None:
     """让对话框跟随主窗口主题变化重刷，避免开着弹窗切主题时"花脸"。"""
     state: dict[str, str | None] = {"binding": None}
 
-    def on_theme_changed(_event=None) -> None:
+    def on_theme_changed(_event: tk.Event | None = None) -> None:
         try:
             if not dialog.winfo_exists():
                 return
@@ -185,32 +223,32 @@ def wire_dialog_theme(dialog: tk.Toplevel, parent: tk.Misc, classic_widgets: lis
                     continue
                 supported = set(widget.keys())
                 options = {
-                    "background": colors["field"], "foreground": colors["text"],
+                    "background": colors["field"],
+                    "foreground": colors["text"],
                     "insertbackground": colors["text"],
-                    "selectbackground": colors["select"], "selectforeground": colors["select_text"],
-                    "highlightbackground": colors["border"], "highlightcolor": colors["accent"],
+                    "selectbackground": colors["select"],
+                    "selectforeground": colors["select_text"],
+                    "highlightbackground": colors["border"],
+                    "highlightcolor": colors["accent"],
                 }
                 widget.configure(**{k: v for k, v in options.items() if k in supported})
             except tk.TclError:
                 continue
 
-    def on_destroy(event=None) -> None:
+    def on_destroy(event: tk.Event | None = None) -> None:
         if event is not None and event.widget is not dialog:
             return
         funcid = state["binding"]
         if funcid:
-            try:
+            with suppress(tk.TclError, AttributeError):
                 parent.unbind("<<ThemeChanged>>", funcid)
-            except (tk.TclError, AttributeError):
-                pass
             state["binding"] = None
 
     state["binding"] = parent.bind("<<ThemeChanged>>", on_theme_changed, add="+")
     dialog.bind("<Destroy>", on_destroy, add="+")
-    # 保持引用，防止闭包被回收
-    dialog._theme_hooks = (on_theme_changed, on_destroy)  # type: ignore[attr-defined]
-
-
+    # 保持引用，防止闭包被回收。Tk 控件是动态属性容器，用 cast 声明而非
+    # 依赖 setattr，既让 mypy 满意又不掩盖类型
+    cast("Any", dialog)._theme_hooks = (on_theme_changed, on_destroy)
 
 
 def _device_match_aliases(display: DeviceDisplay) -> tuple[str, ...]:
@@ -246,7 +284,7 @@ class NetGuardApp(tk.Tk):
         self._menus: list[tk.Menu] = []
         self._capture_indicator: tk.Label | None = None
         self._status_bar: tk.Label | None = None
-        self._busy_label: tk.Label | None = None
+        self._busy_label: tk.Widget | None = None
         self._log_text: tk.Text | None = None
         self._log_expanded = False
         self._icon_stack = ExitStack()
@@ -267,18 +305,21 @@ class NetGuardApp(tk.Tk):
         self._refilter_cursor = 0
         self._sort_column = ""
         self._sort_descending = False
+        # 表头分隔线双击检测：(event.time, event.x)
+        self._last_separator_click: tuple[int, int] | None = None
         self._busy_count = 0
-        self._background_queue: queue.Queue = queue.Queue()
+        # 队列元素：("ok"|"error", 标题, 消息, 主线程待执行的零参回调)
+        self._background_queue: queue.Queue[tuple[str, str | None, str | None, Callable[[], None] | None]] = (
+            queue.Queue()
+        )
         self.packet_count_var = tk.StringVar(value="已显示 0 条")
         self.alert_packet_indices: list[int] = []
         self._error_packet_indices: list[int] = []
         self._last_error_refresh = 0.0
         self.alerts_placeholder = False
         self._theme = ThemeManager(self)
-        try:
+        with suppress(tk.TclError):
             self._theme.theme_use("clam")
-        except tk.TclError:
-            pass
         self._set_window_icon()
         self._build()
         self._build_menu()
@@ -315,10 +356,8 @@ class NetGuardApp(tk.Tk):
             try:
                 self.state("zoomed")
             except tk.TclError:
-                try:
+                with suppress(tk.TclError):
                     self.attributes("-zoomed", True)
-                except tk.TclError:
-                    pass
 
     def _clamped_geometry(self, geometry: str) -> str:
         """恢复窗口位置时按当前屏幕钳制，外接显示器拔掉后窗口不至于整个在屏外。"""
@@ -369,7 +408,9 @@ class NetGuardApp(tk.Tk):
             return
         for index in range(self.alerts.size()):
             try:
-                self.alerts.itemconfigure(index, fg=self._alert_color(self.alerts.get(index, index)))
+                # 必须用单参数 get：Listbox.get(first, last) 返回元组，会把
+                # 元组喂给 _alert_color 触发 AttributeError
+                self.alerts.itemconfigure(index, fg=self._alert_color(self.alerts.get(index)))
             except tk.TclError:
                 return
 
@@ -402,17 +443,15 @@ class NetGuardApp(tk.Tk):
             self._apply_theme()
         self.after(SYSTEM_THEME_POLL_MS, self._poll_system_theme)
 
-    def _load_config(self) -> dict:
+    def _load_config(self) -> dict[str, Any]:
         return self._config.to_dict()
 
     def _schedule_config_save(self) -> None:
         if not self._config_ready:
             return
         if self._config_save_after_id is not None:
-            try:
+            with suppress(tk.TclError):
                 self.after_cancel(self._config_save_after_id)
-            except tk.TclError:
-                pass
         self._config_save_after_id = self.after(CONFIG_SAVE_DEBOUNCE_MS, self._save_config)
 
     def _collect_layout_state(self) -> None:
@@ -438,10 +477,8 @@ class NetGuardApp(tk.Tk):
                     window.sashes[name] = pos
             except tk.TclError:
                 continue
-        try:
+        with suppress(tk.TclError):
             window.columns = {col: int(self.table.column(col, "width")) for col in self.table["columns"]}
-        except tk.TclError:
-            pass
         window.sort_column = self._sort_column
         window.sort_descending = self._sort_descending
         # 保存内部设备名而非显示名，恢复时按 device.name 匹配（两者在 Windows 上不同）
@@ -480,21 +517,21 @@ class NetGuardApp(tk.Tk):
         self.device_box = ttk.Combobox(capture_controls, textvariable=self.device_var, width=28, state="readonly")
         self.device_box.grid(row=0, column=1, sticky=tk.EW, padx=(0, 10))
         self.device_box.bind("<<ComboboxSelected>>", lambda _: self._on_device_selected())
-        ttk.Label(capture_controls, text="抓包过滤(BPF)", style="Muted.TLabel").grid(row=0, column=2, sticky=tk.W, padx=(0, 6))
+        ttk.Label(capture_controls, text="抓包过滤(BPF)", style="Muted.TLabel").grid(
+            row=0, column=2, sticky=tk.W, padx=(0, 6)
+        )
         # 空 BPF 表示抓全部流量，不要用 or 回退默认值
         self.bpf_var = tk.StringVar(value=self._config.window.bpf)
         bpf_entry = ttk.Entry(capture_controls, textvariable=self.bpf_var, style="Filter.TEntry")
         self.bpf_var_entry = bpf_entry
-        bpf_entry.grid(
-            row=0, column=3, sticky=tk.EW, padx=(0, 6)
-        )
+        bpf_entry.grid(row=0, column=3, sticky=tk.EW, padx=(0, 6))
         bpf_entry.bind("<Return>", lambda _: self._apply_bpf_entry())
-        ttk.Button(capture_controls, text="应用BPF", width=7, style="Accent.TButton", command=self._apply_bpf_entry).grid(
-            row=0, column=4, sticky=tk.EW, padx=(0, 6)
-        )
-        ttk.Button(capture_controls, text="BPF 模板", width=8, style="Secondary.TButton", command=self._show_bpf_templates).grid(
-            row=0, column=5, sticky=tk.EW
-        )
+        ttk.Button(
+            capture_controls, text="应用BPF", width=7, style="Accent.TButton", command=self._apply_bpf_entry
+        ).grid(row=0, column=4, sticky=tk.EW, padx=(0, 6))
+        ttk.Button(
+            capture_controls, text="BPF 模板", width=8, style="Secondary.TButton", command=self._show_bpf_templates
+        ).grid(row=0, column=5, sticky=tk.EW)
 
         self.status_var = tk.StringVar(value="正在加载网卡...")
         status_frame = ttk.Frame(toolbar, style="Toolbar.TFrame")
@@ -502,16 +539,21 @@ class NetGuardApp(tk.Tk):
         status_frame.columnconfigure(1, weight=1)
         initial_colors = build_colors(self.dark_mode.get())
         self._capture_indicator = tk.Label(
-            status_frame, text="●", font=self._theme.font_small,
-            fg=status_color(initial_colors, "idle"), bg=initial_colors["toolbar"],
-            borderwidth=0, highlightthickness=0,
+            status_frame,
+            text="●",
+            font=self._theme.font_small,
+            fg=status_color(initial_colors, "idle"),
+            bg=initial_colors["toolbar"],
+            borderwidth=0,
+            highlightthickness=0,
         )
         self._capture_indicator.grid(row=0, column=0, sticky=tk.W, padx=(0, 4))
         self._log_text = tk.Text(status_frame, height=2, wrap=tk.WORD, state=tk.DISABLED)
         self._log_text.grid(row=0, column=1, sticky=tk.EW)
         self._classic_widgets.append(self._log_text)
-        self._log_expand_btn = ttk.Button(status_frame, text="展开", width=4, style="Secondary.TButton",
-                                          command=self._toggle_log)
+        self._log_expand_btn = ttk.Button(
+            status_frame, text="展开", width=4, style="Secondary.TButton", command=self._toggle_log
+        )
         self._log_expand_btn.grid(row=0, column=2, sticky=tk.E, padx=(4, 10))
 
         actions = ttk.Frame(toolbar, style="Toolbar.TFrame")
@@ -523,23 +565,39 @@ class NetGuardApp(tk.Tk):
         self.start_btn.grid(row=0, column=1, sticky=tk.EW, padx=(0, 6))
         self.stop_btn = ttk.Button(actions, text="停止", width=8, style="Danger.TButton", command=self._stop)
         self.stop_btn.grid(row=0, column=2, sticky=tk.EW, padx=(0, 6))
-        self.pause_btn = ttk.Button(actions, text="暂停", width=8, style="Secondary.TButton", command=self._toggle_pause)
+        self.pause_btn = ttk.Button(
+            actions, text="暂停", width=8, style="Secondary.TButton", command=self._toggle_pause
+        )
         self.pause_btn.grid(row=0, column=3, sticky=tk.EW, padx=(0, 6))
         ttk.Button(actions, text="清空", width=8, style="Secondary.TButton", command=self._clear).grid(
-            row=0, column=4, sticky=tk.EW)
+            row=0, column=4, sticky=tk.EW
+        )
         ttk.Button(actions, text="测试发包", width=10, style="Secondary.TButton", command=self._open_traffic_gen).grid(
-            row=1, column=1, sticky=tk.EW, padx=(0, 6), pady=(6, 0))
+            row=1, column=1, sticky=tk.EW, padx=(0, 6), pady=(6, 0)
+        )
         ttk.Button(actions, text="网段扫描", width=10, style="Secondary.TButton", command=self._open_subnet_scan).grid(
-            row=1, column=2, sticky=tk.EW, padx=(0, 6), pady=(6, 0))
-        self.export_alerts_btn = ttk.Button(actions, text="导出告警", width=10, style="Secondary.TButton", command=self._export_alerts)
+            row=1, column=2, sticky=tk.EW, padx=(0, 6), pady=(6, 0)
+        )
+        self.export_alerts_btn = ttk.Button(
+            actions, text="导出告警", width=10, style="Secondary.TButton", command=self._export_alerts
+        )
         self.export_alerts_btn.grid(row=1, column=3, sticky=tk.EW, padx=(0, 6), pady=(6, 0))
-        ttk.Checkbutton(actions, text="夜间模式", variable=self.dark_mode, style="Switch.TCheckbutton", command=self._toggle_night_mode).grid(
-            row=1, column=4, sticky=tk.W, padx=(0, 6), pady=(6, 0))
+        ttk.Checkbutton(
+            actions,
+            text="夜间模式",
+            variable=self.dark_mode,
+            style="Switch.TCheckbutton",
+            command=self._toggle_night_mode,
+        ).grid(row=1, column=4, sticky=tk.W, padx=(0, 6), pady=(6, 0))
         ttk.Button(actions, text="退出", width=8, style="Danger.TButton", command=self._exit).grid(
-            row=1, column=5, sticky=tk.EW, pady=(6, 0))
+            row=1, column=5, sticky=tk.EW, pady=(6, 0)
+        )
         ttk.Button(actions, text="打开 pcap", width=10, style="Secondary.TButton", command=self._open_pcap).grid(
-            row=2, column=1, sticky=tk.EW, padx=(0, 6), pady=(6, 0))
-        self.save_pcap_btn = ttk.Button(actions, text="保存 pcap", width=10, style="Secondary.TButton", command=self._save_pcap)
+            row=2, column=1, sticky=tk.EW, padx=(0, 6), pady=(6, 0)
+        )
+        self.save_pcap_btn = ttk.Button(
+            actions, text="保存 pcap", width=10, style="Secondary.TButton", command=self._save_pcap
+        )
         self.save_pcap_btn.grid(row=2, column=2, sticky=tk.EW, padx=(0, 6), pady=(6, 0))
 
         filters = ttk.Frame(self, padding=(10, 5), style="FilterBar.TFrame")
@@ -551,16 +609,27 @@ class NetGuardApp(tk.Tk):
         self.display_filter_entry = entry
         entry.grid(row=0, column=1, sticky=tk.EW, padx=(0, 8))
         entry.bind("<KeyRelease>", lambda _: self._debounced_refilter())
-        ttk.Button(filters, text="过滤模板", width=8, style="Secondary.TButton", command=self._show_display_filter_templates).grid(
-            row=0, column=2, sticky=tk.EW, padx=(0, 6)
+        ttk.Button(
+            filters, text="过滤模板", width=8, style="Secondary.TButton", command=self._show_display_filter_templates
+        ).grid(row=0, column=2, sticky=tk.EW, padx=(0, 6))
+        ttk.Button(filters, text="应用", width=8, style="Secondary.TButton", command=self._refilter).grid(
+            row=0, column=3, sticky=tk.EW
         )
-        ttk.Button(filters, text="应用", width=8, style="Secondary.TButton", command=self._refilter).grid(row=0, column=3, sticky=tk.EW)
         metrics = ttk.Frame(filters, style="FilterBar.TFrame")
         metrics.grid(row=1, column=0, columnspan=4, sticky=tk.W, pady=(5, 0))
         for column, variable in enumerate(
-            (self.packet_count_var, self.packet_total_var, self.rate_var, self.bytes_rate_var, self.session_var, self.alert_count_var)
+            (
+                self.packet_count_var,
+                self.packet_total_var,
+                self.rate_var,
+                self.bytes_rate_var,
+                self.session_var,
+                self.alert_count_var,
+            )
         ):
-            ttk.Label(metrics, textvariable=variable, style="FilterLabel.TLabel").grid(row=0, column=column, sticky=tk.W, padx=(0, 12))
+            ttk.Label(metrics, textvariable=variable, style="FilterLabel.TLabel").grid(
+                row=0, column=column, sticky=tk.W, padx=(0, 12)
+            )
 
         workspace = ttk.PanedWindow(self, orient=tk.VERTICAL, style="Content.TPanedwindow")
         workspace.grid(row=2, column=0, sticky=tk.NSEW, padx=8, pady=(0, 8))
@@ -586,8 +655,8 @@ class NetGuardApp(tk.Tk):
         packet_frame.rowconfigure(0, weight=1)
         packet_frame.columnconfigure(0, weight=1)
         self.table = ttk.Treeview(packet_frame, columns=columns, show="headings", height=14)
-        for col, width in zip(columns, [100, 170, 170, 72, 68, 440]):
-            self.table.heading(col, text=headings[col], command=lambda c=col: self._sort(c))
+        for col, width in zip(columns, [100, 170, 170, 72, 68, 440], strict=True):
+            self.table.heading(col, text=headings[col], command=partial(self._sort, col))
             self.table.column(col, width=width, anchor=tk.W)
         self.table.column("len", anchor=tk.E, stretch=False)
         self.table.column("proto", anchor=tk.CENTER, stretch=False)
@@ -634,7 +703,9 @@ class NetGuardApp(tk.Tk):
         error_header.pack(fill=tk.X, pady=(0, 4))
         self.error_summary_var = tk.StringVar(value="解析问题 0 | 致命异常 0")
         ttk.Label(error_header, textvariable=self.error_summary_var, style="FilterLabel.TLabel").pack(side=tk.LEFT)
-        ttk.Label(error_header, text="异常包不会被丢弃，而是标记问题后继续流转", style="Muted.TLabel").pack(side=tk.RIGHT)
+        ttk.Label(error_header, text="异常包不会被丢弃，而是标记问题后继续流转", style="Muted.TLabel").pack(
+            side=tk.RIGHT
+        )
         error_inner = ttk.Frame(error_frame)
         error_inner.pack(fill=tk.BOTH, expand=True)
         self.error_list = tk.Listbox(error_inner, height=4)
@@ -660,10 +731,15 @@ class NetGuardApp(tk.Tk):
         self._classic_widgets.append(self.rules_text)
         self.rules_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         ttk.Button(rules_actions, text="加载规则", style="Secondary.TButton", command=self._load_rules).pack(fill=tk.X)
-        ttk.Button(rules_actions, text="规则模板", style="Secondary.TButton", command=self._show_ids_rule_templates).pack(fill=tk.X, pady=(4, 0))
-        ttk.Button(rules_actions, text="自动生成", style="Secondary.TButton",
-                   command=self._show_rule_suggestions).pack(fill=tk.X, pady=(4, 0))
-        ttk.Button(rules_actions, text="清空规则", style="Secondary.TButton", command=self._clear_rules).pack(fill=tk.X, pady=(4, 0))
+        ttk.Button(
+            rules_actions, text="规则模板", style="Secondary.TButton", command=self._show_ids_rule_templates
+        ).pack(fill=tk.X, pady=(4, 0))
+        ttk.Button(rules_actions, text="自动生成", style="Secondary.TButton", command=self._show_rule_suggestions).pack(
+            fill=tk.X, pady=(4, 0)
+        )
+        ttk.Button(rules_actions, text="清空规则", style="Secondary.TButton", command=self._clear_rules).pack(
+            fill=tk.X, pady=(4, 0)
+        )
         bottom_area.add(rules_frame, weight=1)
         self._bottom_panes = bottom_area
         self._workspace = workspace
@@ -679,8 +755,11 @@ class NetGuardApp(tk.Tk):
         bar.grid(row=3, column=0, sticky=tk.EW)
         bar.columnconfigure(1, weight=1)
         self._status_bar = tk.Label(
-            bar, textvariable=self.status_text_var,
-            font=self._theme.font_small, borderwidth=0, highlightthickness=0,
+            bar,
+            textvariable=self.status_text_var,
+            font=self._theme.font_small,
+            borderwidth=0,
+            highlightthickness=0,
         )
         self._status_bar.grid(row=0, column=0, sticky=tk.W, padx=(0, 12))
         self._busy_label = ttk.Label(bar, textvariable=self.busy_text_var, style="Muted.TLabel")
@@ -724,8 +803,10 @@ class NetGuardApp(tk.Tk):
         theme_menu = self._submenu(view_menu, "主题")
         for label, mode in (("浅色", "light"), ("深色", "dark"), ("跟随系统", "system")):
             theme_menu.add_radiobutton(
-                label=label, value=mode, variable=self.theme_mode,
-                command=lambda m=mode: self._set_theme_mode(m),
+                label=label,
+                value=mode,
+                variable=self.theme_mode,
+                command=partial(self._set_theme_mode, mode),
             )
         view_menu.add_cascade(label="主题", menu=theme_menu)
         view_menu.add_command(label="聚焦显示过滤", accelerator="Ctrl+F", command=self._focus_display_filter)
@@ -751,6 +832,11 @@ class NetGuardApp(tk.Tk):
         self._menus.append(menu)
         return menu
 
+    @staticmethod
+    def _invoke_ignoring_event(callback: Callable[[], None], _event: tk.Event | None = None) -> None:
+        """适配 Tk 的 event 回调约定：丢弃 event，只调用无参回调。"""
+        callback()
+
     def _bind_shortcuts(self) -> None:
         # 绑定到主窗口而非 bind_all，避免对话框打开时快捷键误触发主窗口动作
         mapping = {
@@ -767,7 +853,7 @@ class NetGuardApp(tk.Tk):
             "<Escape>": self._on_escape,
         }
         for sequence, callback in mapping.items():
-            self.bind(sequence, lambda _event, cb=callback: cb())
+            self.bind(sequence, partial(self._invoke_ignoring_event, callback))
         # Tk Text 类绑定了 <Control-o>（自插入换行），与"打开 pcap"冲突：
         # 在每个 Text 上拦截该序列，一次按键只触发主窗口动作
         for text in (self._log_text, self.detail, self.hex_view, self.stats_text, self.rules_text):
@@ -829,11 +915,11 @@ class NetGuardApp(tk.Tk):
                 continue
         self._schedule_config_save()
 
-    def _maybe_autofit_separator(self, event) -> None:
+    def _maybe_autofit_separator(self, event: tk.Event) -> None:
         """双击表头分隔线时对该列做内容自适应。"""
         if self.table.identify_region(event.x, event.y) != "separator":
             return
-        if getattr(self, "_last_separator_click", None):
+        if self._last_separator_click is not None:
             last_time, last_x = self._last_separator_click
             if event.time - last_time < 500 and abs(event.x - last_x) < 8:
                 col_id = self.table.identify_column(event.x)
@@ -855,8 +941,11 @@ class NetGuardApp(tk.Tk):
         if not path:
             return
         # 在主线程快照（遵循过滤条件），后台只做文件写入
-        rows = [self.events[idx - self.event_offset].packet for idx in self.filtered
-                if 0 <= idx - self.event_offset < len(self.events)]
+        rows = [
+            self.events[idx - self.event_offset].packet
+            for idx in self.filtered
+            if 0 <= idx - self.event_offset < len(self.events)
+        ]
 
         def work() -> int:
             import csv
@@ -865,19 +954,26 @@ class NetGuardApp(tk.Tk):
                 writer = csv.writer(handle)
                 writer.writerow(["时间", "源地址", "源端口", "目的地址", "目的端口", "协议", "长度", "摘要"])
                 for packet in rows:
-                    writer.writerow([
-                        f"{packet.timestamp:.3f}", packet.src, packet.src_port or "",
-                        packet.dst, packet.dst_port or "", packet.protocol,
-                        packet.length, packet.summary,
-                    ])
+                    writer.writerow(
+                        [
+                            f"{packet.timestamp:.3f}",
+                            packet.src,
+                            packet.src_port or "",
+                            packet.dst,
+                            packet.dst_port or "",
+                            packet.protocol,
+                            packet.length,
+                            packet.summary,
+                        ]
+                    )
             return len(rows)
 
-        def done(count: object) -> None:
-            self._log(f"已导出 {int(count)} 条数据包到 {path}")  # type: ignore[arg-type]
+        def done(count: int) -> None:
+            self._log(f"已导出 {count} 条数据包到 {path}")
 
         self._run_in_background(work, done, "正在导出 CSV…", "导出错误")
 
-    def _popup_table_menu(self, event) -> None:
+    def _popup_table_menu(self, event: tk.Event) -> None:
         row = self.table.identify_row(event.y)
         if row:
             self.table.selection_set(row)
@@ -909,14 +1005,16 @@ class NetGuardApp(tk.Tk):
         elif mode == "hex":
             text = hex_dump(packet.raw)
         else:
-            text = "\t".join((
-                f"{packet.timestamp:.3f}",
-                f"{packet.src}:{packet.src_port or ''}",
-                f"{packet.dst}:{packet.dst_port or ''}",
-                packet.protocol,
-                str(packet.length),
-                packet.summary,
-            ))
+            text = "\t".join(
+                (
+                    f"{packet.timestamp:.3f}",
+                    f"{packet.src}:{packet.src_port or ''}",
+                    f"{packet.dst}:{packet.dst_port or ''}",
+                    packet.protocol,
+                    str(packet.length),
+                    packet.summary,
+                )
+            )
         self.clipboard_clear()
         self.clipboard_append(text)
         self._log("已复制到剪贴板")
@@ -930,8 +1028,12 @@ class NetGuardApp(tk.Tk):
 
     def _update_sort_indicator(self) -> None:
         base = {
-            "time": "时间", "src": "源地址", "dst": "目的地址",
-            "proto": "协议", "len": "长度", "summary": "摘要",
+            "time": "时间",
+            "src": "源地址",
+            "dst": "目的地址",
+            "proto": "协议",
+            "len": "长度",
+            "summary": "摘要",
         }
         for col, text in base.items():
             if col == self._sort_column:
@@ -943,12 +1045,14 @@ class NetGuardApp(tk.Tk):
 
     # --- 后台执行 ---------------------------------------------------------
 
-    def _run_in_background(self, work: Callable[[], object], on_done: Callable[[object], None],
-                           busy_text: str, error_title: str) -> None:
+    def _run_in_background(
+        self, work: Callable[[], _T], on_done: Callable[[_T], None], busy_text: str, error_title: str
+    ) -> None:
         """在后台线程执行耗时工作，完成后由主线程回调。
 
         结果通过线程安全队列回传，由 `_pump_background` 在主线程消费——绝不在
-        子线程调用 Tk（`after` 在非 mainloop 线程下不可靠）。
+        子线程调用 Tk（`after` 在非 mainloop 线程下不可靠）。队列里存的是已绑定
+        好结果的零参回调，主线程只需调用，无需再做类型判断。
         """
         self._begin_busy(busy_text)
 
@@ -959,7 +1063,7 @@ class NetGuardApp(tk.Tk):
                 logger.exception("后台任务失败：%s", busy_text)
                 self._background_queue.put(("error", error_title, str(exc), None))
                 return
-            self._background_queue.put(("ok", None, None, (on_done, result)))
+            self._background_queue.put(("ok", None, None, lambda: on_done(result)))
 
         threading.Thread(target=runner, name="netguard-bg", daemon=True).start()
 
@@ -974,28 +1078,26 @@ class NetGuardApp(tk.Tk):
             if kind == "error":
                 messagebox.showerror(title or "错误", message or "", parent=self)
             else:
-                on_done, result = payload  # type: ignore[misc]
+                callback = payload
+                if callback is None:
+                    continue
                 try:
-                    on_done(result)
+                    callback()
                 except Exception:
                     logger.exception("后台任务回调异常")
 
     def _begin_busy(self, text: str) -> None:
         self._busy_count += 1
         self.busy_text_var.set(text)
-        try:
+        with suppress(tk.TclError):
             self.configure(cursor="watch")
-        except tk.TclError:
-            pass
 
     def _end_busy(self) -> None:
         self._busy_count = max(0, self._busy_count - 1)
         if self._busy_count == 0:
             self.busy_text_var.set("")
-            try:
+            with suppress(tk.TclError):
                 self.configure(cursor="")
-            except tk.TclError:
-                pass
 
     def _on_busy(self, text: str) -> None:
         self.busy_text_var.set(text)
@@ -1010,7 +1112,7 @@ class NetGuardApp(tk.Tk):
             "网卡加载失败",
         )
 
-    def _set_devices(self, devices) -> None:
+    def _set_devices(self, devices: list[CaptureDevice]) -> None:
         self.device_displays = build_device_displays(devices)
         values = [item.display_name for item in self.device_displays]
         self.display_to_device = {item.display_name: item.device.name for item in self.device_displays}
@@ -1063,6 +1165,8 @@ class NetGuardApp(tk.Tk):
 
     def _toggle_log(self) -> None:
         self._log_expanded = not self._log_expanded
+        if self._log_text is None:
+            return
         if self._log_expanded:
             self._log_text.configure(height=12)
             self._log_expand_btn.configure(text="收起")
@@ -1130,8 +1234,8 @@ class NetGuardApp(tk.Tk):
         def work() -> int:
             return self.pipeline.load_rules(text)
 
-        def done(failed: object) -> None:
-            failed_count = int(failed)  # type: ignore[arg-type]
+        def done(failed: int) -> None:
+            failed_count = failed
             loaded = self.pipeline.rule_count
             if failed_count:
                 self._log(f"已加载 {loaded} 条规则，跳过 {failed_count} 条无效规则")
@@ -1162,9 +1266,14 @@ class NetGuardApp(tk.Tk):
         if display is None:
             messagebox.showwarning("网段扫描", "请先在主窗口选择一个网卡。", parent=self)
             return
-        SubnetScanDialog(self, display, self.device_displays, self.bpf_var,
-                        on_switch_device=self._switch_to_device,
-                        on_add_bpf_template=self._add_bpf_template)
+        SubnetScanDialog(
+            self,
+            display,
+            self.device_displays,
+            self.bpf_var,
+            on_switch_device=self._switch_to_device,
+            on_add_bpf_template=self._add_bpf_template,
+        )
 
     def _switch_to_device(self, device_name: str) -> None:
         for item in self.device_displays:
@@ -1280,8 +1389,8 @@ class NetGuardApp(tk.Tk):
         def work() -> int:
             return write_pcap(path, raws)
 
-        def done(count: object) -> None:
-            self._log(f"已保存 {int(count)} 个数据包到 {path}")  # type: ignore[arg-type]
+        def done(count: int) -> None:
+            self._log(f"已保存 {count} 个数据包到 {path}")
 
         self._run_in_background(work, done, "正在保存 pcap…", "保存错误")
 
@@ -1362,7 +1471,9 @@ class NetGuardApp(tk.Tk):
 
     def _show_rule_suggestions(self) -> None:
         if not self.events:
-            messagebox.showinfo("自动生成规则", "当前还没有可用于生成 IDS 规则的 TCP、UDP、HTTP 或 DNS 数据包。", parent=self)
+            messagebox.showinfo(
+                "自动生成规则", "当前还没有可用于生成 IDS 规则的 TCP、UDP、HTTP 或 DNS 数据包。", parent=self
+            )
             return
         self._log("正在分析数据包生成 IDS 规则建议...")
         # 主线程快照，避免后台线程遍历 self.events 时与 _tick 的裁剪竞争
@@ -1374,10 +1485,12 @@ class NetGuardApp(tk.Tk):
             "自动生成规则",
         )
 
-    def _show_suggestions_result(self, suggestions: list) -> None:
+    def _show_suggestions_result(self, suggestions: list[RuleSuggestion]) -> None:
         if not suggestions:
             self._log("自动生成规则：无可用建议")
-            messagebox.showinfo("自动生成规则", "当前还没有可用于生成 IDS 规则的 TCP、UDP、HTTP 或 DNS 数据包。", parent=self)
+            messagebox.showinfo(
+                "自动生成规则", "当前还没有可用于生成 IDS 规则的 TCP、UDP、HTTP 或 DNS 数据包。", parent=self
+            )
             return
         self._log(f"自动生成规则：已生成 {len(suggestions)} 条建议")
         RuleSuggestionDialog(self, suggestions, self._append_generated_rules)
@@ -1485,7 +1598,7 @@ class NetGuardApp(tk.Tk):
         self._update_indicator()
 
     def _catch_up_paused_alerts(self) -> None:
-        pause_total = getattr(self, '_pause_event_total', 0)
+        pause_total = getattr(self, "_pause_event_total", 0)
         for local_idx, event in enumerate(self.events):
             global_idx = self.event_offset + local_idx
             if global_idx < pause_total:
@@ -1512,7 +1625,7 @@ class NetGuardApp(tk.Tk):
         self._update_control_states()
 
     def _tick(self) -> None:
-        if self.__dict__.get('_destroyed', False):
+        if self.__dict__.get("_destroyed", False):
             return
         try:
             self._pump_background()
@@ -1703,16 +1816,12 @@ class NetGuardApp(tk.Tk):
 
     def _refilter(self) -> None:
         if self._filter_after_id is not None:
-            try:
+            with suppress(tk.TclError):
                 self.after_cancel(self._filter_after_id)
-            except tk.TclError:
-                pass
         self._filter_after_id = None
         if self._refilter_after_id is not None:
-            try:
+            with suppress(tk.TclError):
                 self.after_cancel(self._refilter_after_id)
-            except tk.TclError:
-                pass
             self._refilter_after_id = None
         self.table.delete(*self.table.get_children())
         self.filtered.clear()
@@ -1862,22 +1971,19 @@ class NetGuardApp(tk.Tk):
                     handle.write(item + "\n")
                 return len(lines)
 
-        def done(count: object) -> None:
-            self._log(f"已导出 {int(count)} 条告警到 {path}")  # type: ignore[arg-type]
+        def done(count: int) -> None:
+            self._log(f"已导出 {count} 条告警到 {path}")
 
         self._run_in_background(work, done, "正在导出告警…", "导出错误")
 
     def destroy(self) -> None:
         self._destroyed = True
-        try:
+        # 退出清理：pipeline.stop / 图标栈关闭失败不应阻止窗口销毁
+        with suppress(Exception):
             self.pipeline.stop()
-        except Exception:
-            pass
         self.capturing = False
-        try:
+        with suppress(Exception):
             self._icon_stack.close()
-        except Exception:
-            pass
         super().destroy()
 
 
@@ -1938,7 +2044,9 @@ class RuleSuggestionDialog(tk.Toplevel):
         actions = ttk.Frame(self, padding=(8, 0, 8, 8))
         actions.grid(row=1, column=0, sticky=tk.EW)
         actions.columnconfigure(0, weight=1)
-        ttk.Button(actions, text="采用选中规则", style="Accent.TButton", command=self._apply).grid(row=0, column=1, padx=(0, 6))
+        ttk.Button(actions, text="采用选中规则", style="Accent.TButton", command=self._apply).grid(
+            row=0, column=1, padx=(0, 6)
+        )
         ttk.Button(actions, text="取消", style="Secondary.TButton", command=self.destroy).grid(row=0, column=2)
 
         for suggestion in suggestions:
@@ -2033,12 +2141,16 @@ class TemplateDialog(tk.Toplevel):
             value_row.grid(row=2, column=0, columnspan=2, sticky=tk.EW, pady=(8, 0))
             value_row.columnconfigure(1, weight=1)
             ttk.Label(value_row, text="应用内容", style="Muted.TLabel").grid(row=0, column=0, sticky=tk.W, padx=(0, 6))
-            ttk.Entry(value_row, textvariable=self._value_var, style="Filter.TEntry").grid(row=0, column=1, sticky=tk.EW)
+            ttk.Entry(value_row, textvariable=self._value_var, style="Filter.TEntry").grid(
+                row=0, column=1, sticky=tk.EW
+            )
 
         actions = ttk.Frame(self, padding=(8, 0, 8, 8))
         actions.grid(row=1, column=0, sticky=tk.EW)
         actions.columnconfigure(0, weight=1)
-        ttk.Button(actions, text="采用选中项", style="Accent.TButton", command=self._apply).grid(row=0, column=1, padx=(0, 6))
+        ttk.Button(actions, text="采用选中项", style="Accent.TButton", command=self._apply).grid(
+            row=0, column=1, padx=(0, 6)
+        )
         ttk.Button(actions, text="取消", style="Secondary.TButton", command=self.destroy).grid(row=0, column=2)
 
         for template in templates:
@@ -2107,8 +2219,16 @@ class TrafficGenDialog(tk.Toplevel):
         self.rowconfigure(2, weight=1)
 
         # 顶部提示行
-        self._capture_warning = tk.Label(self, text='⚠ 请先在主窗口点击「开始」启动抓包，再使用自动发包',
-            font=parent._theme.font_small, fg=colors["warning"], bg=colors["bg"], anchor=tk.W, pady=4, padx=8)
+        self._capture_warning = tk.Label(
+            self,
+            text="⚠ 请先在主窗口点击「开始」启动抓包，再使用自动发包",
+            font=parent._theme.font_small,
+            fg=colors["warning"],
+            bg=colors["bg"],
+            anchor=tk.W,
+            pady=4,
+            padx=8,
+        )
         self._capture_warning.grid(row=0, column=0, sticky=tk.EW)
         if parent.capturing:
             self._capture_warning.grid_remove()
@@ -2121,12 +2241,15 @@ class TrafficGenDialog(tk.Toplevel):
         mode_frame = ttk.Frame(header)
         mode_frame.pack(side=tk.RIGHT)
         self._mode_var = tk.StringVar(value="all")
-        ttk.Radiobutton(mode_frame, text="全部", variable=self._mode_var, value="all",
-                        command=self._filter_list).pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Radiobutton(mode_frame, text="正常包", variable=self._mode_var, value="normal",
-                        command=self._filter_list).pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Radiobutton(mode_frame, text="异常包", variable=self._mode_var, value="abnormal",
-                        command=self._filter_list).pack(side=tk.LEFT)
+        ttk.Radiobutton(mode_frame, text="全部", variable=self._mode_var, value="all", command=self._filter_list).pack(
+            side=tk.LEFT, padx=(0, 4)
+        )
+        ttk.Radiobutton(
+            mode_frame, text="正常包", variable=self._mode_var, value="normal", command=self._filter_list
+        ).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Radiobutton(
+            mode_frame, text="异常包", variable=self._mode_var, value="abnormal", command=self._filter_list
+        ).pack(side=tk.LEFT)
 
         # 模板列表
         list_frame = ttk.Frame(self, padding=(8, 4))
@@ -2135,10 +2258,12 @@ class TrafficGenDialog(tk.Toplevel):
         list_frame.columnconfigure(0, weight=1)
         self._listbox = tk.Listbox(list_frame, selectmode=tk.BROWSE, height=14)
         self._listbox.configure(
-            background=colors["field"], foreground=colors["text"],
+            background=colors["field"],
+            foreground=colors["text"],
             selectbackground=colors["select"],
             selectforeground=colors["select_text"],
-            highlightbackground=colors["border"], highlightcolor=colors["accent"],
+            highlightbackground=colors["border"],
+            highlightcolor=colors["accent"],
         )
         self._listbox.grid(row=0, column=0, sticky=tk.NSEW)
         scroll = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self._listbox.yview)
@@ -2148,20 +2273,27 @@ class TrafficGenDialog(tk.Toplevel):
         # 快捷操作行
         quick_bar = ttk.Frame(self, padding=(8, 4, 8, 0))
         quick_bar.grid(row=3, column=0, sticky=tk.EW)
-        ttk.Button(quick_bar, text="全选", style="Secondary.TButton", command=self._select_all).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(quick_bar, text="全选", style="Secondary.TButton", command=self._select_all).pack(
+            side=tk.LEFT, padx=(0, 6)
+        )
         ttk.Button(quick_bar, text="取消全选", style="Secondary.TButton", command=self._deselect_all).pack(side=tk.LEFT)
         self._desc_var = tk.StringVar()
-        ttk.Label(quick_bar, textvariable=self._desc_var, style="Muted.TLabel",
-                  anchor=tk.E, wraplength=400).pack(side=tk.RIGHT)
+        ttk.Label(quick_bar, textvariable=self._desc_var, style="Muted.TLabel", anchor=tk.E, wraplength=400).pack(
+            side=tk.RIGHT
+        )
 
         # 操作按钮行
         action_bar = ttk.Frame(self, padding=(8, 8, 8, 8))
         action_bar.grid(row=4, column=0, sticky=tk.EW)
         self._gen_status_var = tk.StringVar(value="就绪 — 勾选模板后点击开始，每 0.5 秒轮询发送")
-        ttk.Label(action_bar, textvariable=self._gen_status_var, style="Status.TLabel").pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Label(action_bar, textvariable=self._gen_status_var, style="Status.TLabel").pack(
+            side=tk.LEFT, fill=tk.X, expand=True
+        )
         self._toggle_btn = ttk.Button(action_bar, text="开始发包", style="Accent.TButton", command=self._toggle)
         self._toggle_btn.pack(side=tk.RIGHT, padx=(8, 0))
-        ttk.Button(action_bar, text="手动发一次", style="Secondary.TButton", command=self._send_once).pack(side=tk.RIGHT)
+        ttk.Button(action_bar, text="手动发一次", style="Secondary.TButton", command=self._send_once).pack(
+            side=tk.RIGHT
+        )
 
         self._populate_list()
         self._update_select_label()
@@ -2174,15 +2306,13 @@ class TrafficGenDialog(tk.Toplevel):
         wire_dialog_theme(self, parent, [self._listbox])
         self._schedule(200, self._check_capture_state)
 
-    def _schedule(self, delay_ms: int, callback) -> None:
+    def _schedule(self, delay_ms: int, callback: Callable[[], None]) -> None:
         """调度回调并登记 id，已触发的 id 随即移出列表，避免 _after_ids 只增不减。"""
         after_ids = self._after_ids
 
         def wrapped() -> None:
-            try:
+            with suppress(ValueError):
                 after_ids.remove(aid)
-            except ValueError:
-                pass
             callback()
 
         aid = self.after(delay_ms, wrapped)
@@ -2193,10 +2323,9 @@ class TrafficGenDialog(tk.Toplevel):
             self._parent._log("测试发包：窗口关闭，已自动停止发包")
         self._generator.stop()
         for aid in self._after_ids:
-            try:
+            # after 句柄可能已触发/失效，取消失败可忽略
+            with suppress(Exception):
                 self.after_cancel(aid)
-            except Exception:
-                pass
         self._after_ids.clear()
         self.destroy()
 
@@ -2255,7 +2384,7 @@ class TrafficGenDialog(tk.Toplevel):
         self._populate_list()
         self._update_select_label()
 
-    def _toggle_clicked_template(self, event) -> None:
+    def _toggle_clicked_template(self, event: tk.Event) -> None:
         if not self._visible_templates:
             return
         index = self._listbox.nearest(event.y)
@@ -2267,7 +2396,7 @@ class TrafficGenDialog(tk.Toplevel):
             return
         self._toggle_template_at(index)
 
-    def _toggle_focused_template(self, _event=None) -> str:
+    def _toggle_focused_template(self, _event: tk.Event | None = None) -> str:
         selection = self._listbox.curselection()
         if not selection:
             return "break"
@@ -2338,7 +2467,7 @@ class TrafficGenDialog(tk.Toplevel):
                 self._gen_status_var.set(f"⚠ 发包失败：{self._generator.last_error}")
                 self._parent._log(f"测试发包失败：{self._generator.last_error}")
             else:
-                self._gen_status_var.set(f"已停止 — 期间每 0.5 秒轮发一组模板")
+                self._gen_status_var.set("已停止 — 期间每 0.5 秒轮发一组模板")
             self._check_capture_state()
             return
         self._schedule(1000, self._poll_status)
@@ -2346,19 +2475,23 @@ class TrafficGenDialog(tk.Toplevel):
     def destroy(self) -> None:
         self._generator.stop()
         for aid in self._after_ids:
-            try:
+            # after 句柄可能已触发/失效，取消失败可忽略
+            with suppress(Exception):
                 self.after_cancel(aid)
-            except Exception:
-                pass
         self._after_ids.clear()
         super().destroy()
 
 
 class SubnetScanDialog(tk.Toplevel):
-    def __init__(self, parent: NetGuardApp, device_display: DeviceDisplay,
-                 all_displays: list[DeviceDisplay], bpf_var: tk.StringVar,
-                 on_switch_device: Callable[[str], None] | None = None,
-                 on_add_bpf_template: Callable[[str, str, str], None] | None = None) -> None:
+    def __init__(
+        self,
+        parent: NetGuardApp,
+        device_display: DeviceDisplay,
+        all_displays: list[DeviceDisplay],
+        bpf_var: tk.StringVar,
+        on_switch_device: Callable[[str], None] | None = None,
+        on_add_bpf_template: Callable[[str, str, str], None] | None = None,
+    ) -> None:
         super().__init__(parent)
         self.title("网段扫描与管理")
         self.transient(parent)
@@ -2371,9 +2504,7 @@ class SubnetScanDialog(tk.Toplevel):
         self._current_display = device_display
         self._all_displays = all_displays
         self._displays_with_ip = [d for d in all_displays if d.ip_addresses]
-        self._subnets = extract_subnets(
-            device_display.ip_addresses, device_display.device.netmasks
-        )
+        self._subnets = extract_subnets(device_display.ip_addresses, device_display.device.netmasks)
         if not self._subnets:
             self._subnets = detect_subnet_os_fallback(
                 device_display.device.name,
@@ -2388,7 +2519,7 @@ class SubnetScanDialog(tk.Toplevel):
         self._resolve_cancel = threading.Event()
         # 工作线程只往队列投递事件，由主线程轮询消费——绝不在子线程调用 Tk
         # （winfo_exists/after 在非 mainloop 线程下依赖 _tkinter 私有 marshaling）
-        self._event_queue: "queue.Queue[tuple[str, tuple]]" = queue.Queue()
+        self._event_queue: queue.Queue[tuple[str, tuple[Any, ...]]] = queue.Queue()
         self.after(80, self._drain_events)
         colors = build_colors(parent.dark_mode.get())
         self.configure(background=colors["bg"])
@@ -2401,9 +2532,14 @@ class SubnetScanDialog(tk.Toplevel):
         sw_frame.grid(row=0, column=0, sticky=tk.EW)
         ttk.Label(sw_frame, text="网卡", style="Muted.TLabel").pack(side=tk.LEFT, padx=(0, 6))
         self._device_var = tk.StringVar(value=device_display.display_name)
-        device_names = [d.display_name for d in self._displays_with_ip] if self._displays_with_ip else [device_display.display_name]
-        self._device_box = ttk.Combobox(sw_frame, textvariable=self._device_var,
-                                        values=device_names, width=40, state="readonly")
+        device_names = (
+            [d.display_name for d in self._displays_with_ip]
+            if self._displays_with_ip
+            else [device_display.display_name]
+        )
+        self._device_box = ttk.Combobox(
+            sw_frame, textvariable=self._device_var, values=device_names, width=40, state="readonly"
+        )
         self._device_box.pack(side=tk.LEFT, fill=tk.X, expand=True)
         _fit_combobox_width(self._device_box, device_names)
         self._device_box.bind("<<ComboboxSelected>>", lambda _: self._on_device_switched())
@@ -2418,33 +2554,36 @@ class SubnetScanDialog(tk.Toplevel):
         info_frame = ttk.Frame(self, padding=(8, 6, 8, 0))
         info_frame.grid(row=1, column=0, sticky=tk.EW)
         self._info_var = tk.StringVar(value=self._build_info_text())
-        ttk.Label(info_frame, textvariable=self._info_var, style="Muted.TLabel",
-                  wraplength=650, anchor=tk.W, justify=tk.LEFT).pack(fill=tk.X)
+        ttk.Label(
+            info_frame, textvariable=self._info_var, style="Muted.TLabel", wraplength=650, anchor=tk.W, justify=tk.LEFT
+        ).pack(fill=tk.X)
 
         manual_row = ttk.Frame(info_frame)
         manual_row.pack(fill=tk.X, pady=(6, 0))
         ttk.Label(manual_row, text="手动网段:", style="Muted.TLabel").pack(side=tk.LEFT, padx=(0, 6))
         self._manual_cidr = tk.StringVar()
         ttk.Entry(manual_row, textvariable=self._manual_cidr, width=22, style="Filter.TEntry").pack(
-            side=tk.LEFT, padx=(0, 6))
+            side=tk.LEFT, padx=(0, 6)
+        )
         presets = ["192.168.0.0/24", "192.168.1.0/24", "10.0.0.0/24", "172.16.0.0/24", "10.0.1.0/24"]
         self._preset_var = tk.StringVar(value="常用网段")
         preset_box = ttk.Combobox(manual_row, textvariable=self._preset_var, values=presets, width=16, state="readonly")
         preset_box.pack(side=tk.LEFT, padx=(0, 6))
         preset_box.bind("<<ComboboxSelected>>", lambda _: self._manual_cidr.set(self._preset_var.get()))
-        ttk.Button(manual_row, text="应用", width=6, style="Accent.TButton",
-                   command=self._apply_manual_subnet).pack(side=tk.LEFT)
+        ttk.Button(manual_row, text="应用", width=6, style="Accent.TButton", command=self._apply_manual_subnet).pack(
+            side=tk.LEFT
+        )
 
         ctrl_frame = ttk.Frame(self, padding=(8, 4))
         ctrl_frame.grid(row=2, column=0, sticky=tk.EW)
-        self._scan_btn = ttk.Button(ctrl_frame, text="开始扫描", style="Accent.TButton",
-                                    command=self._toggle_scan)
+        self._scan_btn = ttk.Button(ctrl_frame, text="开始扫描", style="Accent.TButton", command=self._toggle_scan)
         self._scan_btn.pack(side=tk.LEFT)
         if not self._subnets:
             self._scan_btn.configure(state=tk.DISABLED)
         self._status_var = tk.StringVar(value="就绪" if self._subnets else self._no_ipv4_status())
-        ttk.Label(ctrl_frame, textvariable=self._status_var, style="Status.TLabel",
-                  anchor=tk.W).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 0))
+        ttk.Label(ctrl_frame, textvariable=self._status_var, style="Status.TLabel", anchor=tk.W).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 0)
+        )
 
         list_frame = ttk.Frame(self, padding=(8, 4))
         list_frame.grid(row=3, column=0, sticky=tk.EW)
@@ -2455,10 +2594,12 @@ class SubnetScanDialog(tk.Toplevel):
         detail_list.columnconfigure(0, weight=1)
         self._host_list = tk.Listbox(detail_list, selectmode=tk.EXTENDED, height=10)
         self._host_list.configure(
-            background=colors["field"], foreground=colors["text"],
+            background=colors["field"],
+            foreground=colors["text"],
             selectbackground=colors["select"],
             selectforeground=colors["select_text"],
-            highlightbackground=colors["border"], highlightcolor=colors["accent"],
+            highlightbackground=colors["border"],
+            highlightcolor=colors["accent"],
         )
         self._host_list.grid(row=0, column=0, sticky=tk.NSEW)
         host_scroll = ttk.Scrollbar(detail_list, orient=tk.VERTICAL, command=self._host_list.yview)
@@ -2468,32 +2609,38 @@ class SubnetScanDialog(tk.Toplevel):
 
         self._detail_text = tk.Text(detail_list, height=6, wrap=tk.WORD)
         self._detail_text.configure(
-            background=colors["field"], foreground=colors["text"],
-            insertbackground=colors["text"], relief=tk.FLAT,
-            highlightbackground=colors["border"], highlightcolor=colors["accent"],
+            background=colors["field"],
+            foreground=colors["text"],
+            insertbackground=colors["text"],
+            relief=tk.FLAT,
+            highlightbackground=colors["border"],
+            highlightcolor=colors["accent"],
         )
         self._detail_text.grid(row=1, column=0, columnspan=2, sticky=tk.NSEW, pady=(8, 0))
         self._detail_text.insert("1.0", "选择主机后可查看详情；点击下方按钮发送 Ping 验证连通性。")
 
         action_bar = ttk.Frame(self, padding=(8, 8))
         action_bar.grid(row=5, column=0, sticky=tk.EW)
-        self._resolve_btn = ttk.Button(action_bar, text="解析主机名", style="Secondary.TButton",
-                                       command=self._toggle_resolve)
+        self._resolve_btn = ttk.Button(
+            action_bar, text="解析主机名", style="Secondary.TButton", command=self._toggle_resolve
+        )
         self._resolve_btn.pack(side=tk.LEFT)
         self._resolve_btn.configure(state=tk.DISABLED)
-        self._ping_btn = ttk.Button(action_bar, text="Ping 选中", style="Secondary.TButton",
-                                    command=self._ping_selected)
+        self._ping_btn = ttk.Button(
+            action_bar, text="Ping 选中", style="Secondary.TButton", command=self._ping_selected
+        )
         self._ping_btn.pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(action_bar, text="保存为 BPF 模板", style="Secondary.TButton",
-                   command=self._save_as_template).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(action_bar, text="应用过滤", style="Accent.TButton",
-                   command=self._apply_subnet_filter).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(action_bar, text="取消", style="Secondary.TButton",
-                   command=self.destroy).pack(side=tk.RIGHT)
+        ttk.Button(action_bar, text="保存为 BPF 模板", style="Secondary.TButton", command=self._save_as_template).pack(
+            side=tk.LEFT, padx=(6, 0)
+        )
+        ttk.Button(action_bar, text="应用过滤", style="Accent.TButton", command=self._apply_subnet_filter).pack(
+            side=tk.LEFT, padx=(6, 0)
+        )
+        ttk.Button(action_bar, text="取消", style="Secondary.TButton", command=self.destroy).pack(side=tk.RIGHT)
         self.bind("<Escape>", lambda _e: self._on_close())
         wire_dialog_theme(self, parent, [self._host_list, self._detail_text])
 
-    def _post_event(self, name: str, *args) -> None:
+    def _post_event(self, name: str, *args: Any) -> None:
         """工作线程调用：只投递事件，绝不直接触碰 Tk。"""
         self._event_queue.put((name, args))
 
@@ -2556,9 +2703,7 @@ class SubnetScanDialog(tk.Toplevel):
 
     def _rebuild_for_device(self, display: DeviceDisplay) -> None:
         self._current_display = display
-        self._subnets = extract_subnets(
-            display.ip_addresses, display.device.netmasks
-        )
+        self._subnets = extract_subnets(display.ip_addresses, display.device.netmasks)
         if not self._subnets:
             self._subnets = detect_subnet_os_fallback(
                 display.device.name,
@@ -2598,15 +2743,16 @@ class SubnetScanDialog(tk.Toplevel):
         try:
             net = ipaddress.IPv4Network(cidr, strict=False)
         except ValueError:
-            messagebox.showwarning("手动网段", f"无效的 CIDR 格式：{cidr}\n\n请输入如 192.168.1.0/24 的格式。", parent=self)
+            messagebox.showwarning(
+                "手动网段", f"无效的 CIDR 格式：{cidr}\n\n请输入如 192.168.1.0/24 的格式。", parent=self
+            )
             return
         # 大小校验必须在任何展开之前：list(net.hosts()) 物化 /8 会构造
         # 1677 万个对象（GB 级内存、主线程冻结数十秒）
         if net.num_addresses > MAX_SWEEP_HOSTS:
             messagebox.showwarning(
                 "手动网段",
-                f"网段过大（{net.num_addresses} 个地址，上限 {MAX_SWEEP_HOSTS}）。\n\n"
-                "请使用 /21 或更小前缀的网段。",
+                f"网段过大（{net.num_addresses} 个地址，上限 {MAX_SWEEP_HOSTS}）。\n\n请使用 /21 或更小前缀的网段。",
                 parent=self,
             )
             return
@@ -2659,8 +2805,9 @@ class SubnetScanDialog(tk.Toplevel):
         def on_progress(completed: int, total: int, last_ip: str) -> None:
             self._post_event("sweep_progress", completed, total, last_ip)
 
-        hosts = ping_sweep(subnet, max_workers=100, timeout=0.8, on_progress=on_progress,
-                           cancel_event=self._scan_cancel)
+        hosts = ping_sweep(
+            subnet, max_workers=100, timeout=0.8, on_progress=on_progress, cancel_event=self._scan_cancel
+        )
         self._post_event("sweep_done", hosts)
 
     def _ev_sweep_progress(self, completed: int, total: int, last_ip: str) -> None:
@@ -2751,8 +2898,9 @@ class SubnetScanDialog(tk.Toplevel):
         def on_progress(completed: int, total: int, last_ip: str) -> None:
             self._post_event("resolve_progress", completed, total, last_ip)
 
-        infos = resolve_hosts(self._alive_hosts, max_workers=40, timeout=2.0, on_progress=on_progress,
-                              cancel_event=self._resolve_cancel)
+        infos = resolve_hosts(
+            self._alive_hosts, max_workers=40, timeout=2.0, on_progress=on_progress, cancel_event=self._resolve_cancel
+        )
         self._post_event("resolve_done", infos)
 
     def _ev_resolve_progress(self, completed: int, total: int, last_ip: str) -> None:

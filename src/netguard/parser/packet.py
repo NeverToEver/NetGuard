@@ -5,7 +5,6 @@ import struct
 from dataclasses import dataclass, field
 from typing import Any
 
-
 HTTP_PORTS = {80, 8000, 8080}
 
 
@@ -166,8 +165,15 @@ def _parse_tcp(info: PacketInfo, data: bytes) -> PacketInfo:
 
 
 _HTTP_METHODS = (
-    b"GET", b"POST", b"PUT", b"DELETE", b"HEAD", b"OPTIONS",
-    b"PATCH", b"CONNECT", b"TRACE",
+    b"GET",
+    b"POST",
+    b"PUT",
+    b"DELETE",
+    b"HEAD",
+    b"OPTIONS",
+    b"PATCH",
+    b"CONNECT",
+    b"TRACE",
 )
 
 
@@ -189,7 +195,7 @@ def _parse_udp(info: PacketInfo, data: bytes) -> PacketInfo:
         return _issue(info, "udp", f"无效的 UDP 长度 {udp_len}")
     if len(data) < udp_len:
         info.issues.append(ParseIssue("udp", "UDP 数据报被截断"))
-    payload = data[8:min(udp_len, len(data))]
+    payload = data[8 : min(udp_len, len(data))]
     info.src_port = src_port
     info.dst_port = dst_port
     info.payload = payload
@@ -243,13 +249,18 @@ def _parse_icmp(info: PacketInfo, data: bytes) -> PacketInfo:
     icmp_code = data[1]
     checksum = struct.unpack("!H", data[2:4])[0]
     type_names = {
-        0: "Echo Reply", 3: "Dest Unreachable", 5: "Redirect",
-        8: "Echo Request", 11: "Time Exceeded",
+        0: "Echo Reply",
+        3: "Dest Unreachable",
+        5: "Redirect",
+        8: "Echo Request",
+        11: "Time Exceeded",
     }
     type_name = type_names.get(icmp_type, f"Type {icmp_type}")
     info.icmp = {
-        "type": icmp_type, "code": icmp_code,
-        "checksum": checksum, "type_name": type_name,
+        "type": icmp_type,
+        "code": icmp_code,
+        "checksum": checksum,
+        "type_name": type_name,
     }
     if icmp_type in (0, 8) and len(data) >= 8:
         ident, seq = struct.unpack("!HH", data[4:8])
@@ -369,5 +380,15 @@ def _mac(value: bytes) -> str:
 
 
 def _tcp_flags(value: int) -> list[str]:
-    names = [(0x100, "NS"), (0x080, "CWR"), (0x040, "ECE"), (0x020, "URG"), (0x010, "ACK"), (0x008, "PSH"), (0x004, "RST"), (0x002, "SYN"), (0x001, "FIN")]
+    names = [
+        (0x100, "NS"),
+        (0x080, "CWR"),
+        (0x040, "ECE"),
+        (0x020, "URG"),
+        (0x010, "ACK"),
+        (0x008, "PSH"),
+        (0x004, "RST"),
+        (0x002, "SYN"),
+        (0x001, "FIN"),
+    ]
     return [name for bit, name in names if value & bit]

@@ -37,6 +37,14 @@ DEFAULT_DETECTOR_CONFIG: dict[str, dict[str, float | int]] = {
 }
 
 
+def _seconds(values: dict[str, float | int], default: float) -> float:
+    return float(values.get("window_seconds", default))
+
+
+def _count(values: dict[str, float | int], key: str, default: int) -> int:
+    return int(values.get(key, default))
+
+
 def build_default_detectors(
     clock: Clock,
     overrides: dict[str, dict[str, float | int]] | None = None,
@@ -45,10 +53,17 @@ def build_default_detectors(
     config = {name: dict(values) for name, values in DEFAULT_DETECTOR_CONFIG.items()}
     for name, values in (overrides or {}).items():
         config.setdefault(name, {}).update(values)
+    # 显式取值而非 **解包：合并后的 dict 是 float | int 联合类型，无法满足
+    # 各检测器对 int 形参的要求，交由 _count / _seconds 收窄
+    syn = config["syn-flood"]
+    scan = config["port-scan"]
+    dns = config["dns-tunnel"]
+    icmp = config["icmp-flood"]
+    brute = config["brute-force"]
     return [
-        SynFloodDetector(clock, **config["syn-flood"]),
-        PortScanDetector(clock, **config["port-scan"]),
-        DnsTunnelDetector(clock, **config["dns-tunnel"]),
-        IcmpFloodDetector(clock, **config["icmp-flood"]),
-        BruteForceDetector(clock, **config["brute-force"]),
+        SynFloodDetector(clock, window_seconds=_seconds(syn, 5.0), threshold=_count(syn, "threshold", 100)),
+        PortScanDetector(clock, window_seconds=_seconds(scan, 10.0), threshold=_count(scan, "threshold", 20)),
+        DnsTunnelDetector(clock, window_seconds=_seconds(dns, 10.0), rate_threshold=_count(dns, "rate_threshold", 50)),
+        IcmpFloodDetector(clock, window_seconds=_seconds(icmp, 5.0), threshold=_count(icmp, "threshold", 100)),
+        BruteForceDetector(clock, window_seconds=_seconds(brute, 60.0), threshold=_count(brute, "threshold", 10)),
     ]

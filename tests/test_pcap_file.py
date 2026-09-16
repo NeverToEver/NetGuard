@@ -104,10 +104,7 @@ def test_pipeline_replays_pcap_file(tmp_path) -> None:
     from netguard.trafficgen import TEMPLATES
 
     builders = [t.build for t in TEMPLATES if t.category == "normal"]
-    packets = [
-        make_packet(1.0 + i * 0.01, builders[i % len(builders)]())
-        for i in range(10)
-    ]
+    packets = [make_packet(1.0 + i * 0.01, builders[i % len(builders)]()) for i in range(10)]
     packets = [RawPacket(p.timestamp, p.data, len(p.data), len(p.data)) for p in packets]
     path = tmp_path / "replay.pcap"
     write_pcap(path, packets)

@@ -72,5 +72,13 @@ alert tcp any any -> any 80 (content "GET"; msg "检测到 HTTP GET 请求";)
 
 ## 攻击检测
 
-除静态规则外，内置基于时间窗口的检测器，可发现 SYN flood、端口扫描、DNS 隧道等行为，
-告警与规则命中一同显示在告警面板，并可导出为 JSON。
+除静态规则外，内置基于时间窗口的检测器，告警与规则命中一同显示在告警面板，
+并可导出为 JSON。阈值可在构造时配置（`netguard.detection.DEFAULT_DETECTOR_CONFIG`）。
+
+| 检测器 | 判据 | 默认阈值 |
+| --- | --- | --- |
+| SYN flood | 窗口内同一 (目的 IP, 端口) 的 SYN 数 | 5s / 100 |
+| 端口扫描 | 窗口内同一源访问的不同目的端口数 | 10s / 20 |
+| DNS 隧道 | 超长域名/标签，或同一后缀高频查询 | 10s / 50 |
+| ICMP flood | 窗口内同一 (源, 目的) 的 ICMP Echo 数 | 5s / 100 |
+| 暴力破解 | 窗口内发往 SSH/FTP/Telnet 等服务端口的 SYN 数 | 60s / 10 |

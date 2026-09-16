@@ -4,13 +4,12 @@ import argparse
 import json
 import os
 import plistlib
-import subprocess
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -23,9 +22,25 @@ PORTABLE_DIR = DIST / f"{APP_NAME}-portable"
 DEFAULT_PYTHON_ENV = os.environ.get("VIRTUAL_ENV", "")
 
 
+def _read_version() -> str:
+    """从 netguard._version 读取版本号，避免与 pyproject 出现第二份拷贝。
+
+    不 import netguard：打包脚本运行时 sys.path 上未必有 src/，且此处只需一个常量。
+    """
+    source = (SRC / "netguard" / "_version.py").read_text(encoding="utf-8")
+    for line in source.splitlines():
+        if line.startswith("__version__"):
+            return line.split("=", 1)[1].strip().strip('"').strip("'")
+    raise SystemExit(f"无法从 {SRC / 'netguard' / '_version.py'} 解析版本号")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="构建内置 Python 运行环境的 NetGuard Unix/macOS 应用")
-    parser.add_argument("--python-env", default=os.environ.get("NETGUARD_PYTHON_ENV", DEFAULT_PYTHON_ENV), help="要打包的 Python 环境路径")
+    parser.add_argument(
+        "--python-env",
+        default=os.environ.get("NETGUARD_PYTHON_ENV", DEFAULT_PYTHON_ENV),
+        help="要打包的 Python 环境路径",
+    )
     args = parser.parse_args()
 
     if not args.python_env:
@@ -38,7 +53,7 @@ def main() -> None:
     if _platform.system() != "Darwin":
         raise SystemExit("此脚本用于构建 macOS .app / Unix 便携包，当前平台不是 macOS。")
 
-    with _staged_env_if_needed(env_path) as build_env:
+    with _StagedEnv(env_path) as build_env:
         DIST.mkdir(parents=True, exist_ok=True)
         BUILD.mkdir(parents=True, exist_ok=True)
         _ensure_icons()
@@ -67,7 +82,7 @@ def _validate_env(env_path: Path) -> None:
         raise SystemExit(f"当前环境无法导入 Tkinter：{python}") from exc
 
 
-class _staged_env_if_needed:
+class _StagedEnv:
     def __init__(self, env_path: Path) -> None:
         self.env_path = env_path
         self.temp_dir: tempfile.TemporaryDirectory[str] | None = None
@@ -112,13 +127,44 @@ def _ensure_icons() -> None:
     glow = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     ImageDraw.Draw(glow).ellipse((170, 140, 854, 850), fill=(45, 212, 191, 48))
     image.alpha_composite(glow.filter(ImageFilter.GaussianBlur(30)))
-    shield = [(512, 142), (780, 252), (780, 470), (764, 586), (714, 694), (628, 788), (512, 882), (396, 788), (310, 694), (260, 586), (244, 470), (244, 252)]
-    inner = [(512, 205), (716, 288), (716, 462), (704, 548), (666, 630), (602, 708), (512, 784), (422, 708), (358, 630), (320, 548), (308, 462), (308, 288)]
+    shield = [
+        (512, 142),
+        (780, 252),
+        (780, 470),
+        (764, 586),
+        (714, 694),
+        (628, 788),
+        (512, 882),
+        (396, 788),
+        (310, 694),
+        (260, 586),
+        (244, 470),
+        (244, 252),
+    ]
+    inner = [
+        (512, 205),
+        (716, 288),
+        (716, 462),
+        (704, 548),
+        (666, 630),
+        (602, 708),
+        (512, 784),
+        (422, 708),
+        (358, 630),
+        (320, 548),
+        (308, 462),
+        (308, 288),
+    ]
     draw.polygon(shield, fill=(241, 245, 249, 255))
     draw.polygon(inner, fill=(15, 23, 42, 255))
     draw.line([(338, 486), (686, 486)], fill=(56, 189, 248, 255), width=42)
     draw.line([(512, 326), (512, 646)], fill=(45, 212, 191, 255), width=42)
-    for x, y, color in [(338, 486, (34, 211, 238, 255)), (512, 326, (45, 212, 191, 255)), (686, 486, (34, 211, 238, 255)), (512, 646, (45, 212, 191, 255))]:
+    for x, y, color in [
+        (338, 486, (34, 211, 238, 255)),
+        (512, 326, (45, 212, 191, 255)),
+        (686, 486, (34, 211, 238, 255)),
+        (512, 646, (45, 212, 191, 255)),
+    ]:
         draw.ellipse((x - 58, y - 58, x + 58, y + 58), fill=color)
         draw.ellipse((x - 28, y - 28, x + 28, y + 28), fill=(240, 253, 250, 255))
     image.save(png_path)
@@ -190,12 +236,13 @@ done
     )
     _write_macos_launcher(macos_dir / APP_NAME)
 
+    version = _read_version()
     plist = {
         "CFBundleName": APP_NAME,
         "CFBundleDisplayName": APP_NAME,
         "CFBundleIdentifier": "local.netguard.app",
-        "CFBundleVersion": "0.1.0",
-        "CFBundleShortVersionString": "0.1.0",
+        "CFBundleVersion": version,
+        "CFBundleShortVersionString": version,
         "CFBundleExecutable": APP_NAME,
         "CFBundlePackageType": "APPL",
         "CFBundleIconFile": "netguard-icon.icns",
@@ -212,7 +259,7 @@ done
 def _write_macos_launcher(path: Path) -> None:
     source = BUILD / "NetGuardLauncher.c"
     source.write_text(
-        r'''#include <errno.h>
+        r"""#include <errno.h>
 #include <limits.h>
 #include <mach-o/dyld.h>
 #include <pwd.h>
@@ -263,7 +310,8 @@ static int run_admin_prepare(const char *resources_dir) {
 
     AuthorizationItem right = {kAuthorizationRightExecute, 0, NULL, 0};
     AuthorizationRights rights = {1, &right};
-    AuthorizationFlags flags = kAuthorizationFlagInteractionAllowed | kAuthorizationFlagPreAuthorize | kAuthorizationFlagExtendRights;
+    AuthorizationFlags flags = kAuthorizationFlagInteractionAllowed | kAuthorizationFlagPreAuthorize
+        | kAuthorizationFlagExtendRights;
     status = AuthorizationCopyRights(auth, &rights, NULL, flags, NULL);
     if (status != errAuthorizationSuccess) {
         AuthorizationFree(auth, kAuthorizationFlagDefaults);
@@ -348,7 +396,7 @@ int main(void) {
     execl(python_path, python_path, main_path, (char *)NULL);
     return 1;
 }
-''',
+""",
         encoding="utf-8",
     )
     clang = shutil.which("clang") or "/usr/bin/clang"
@@ -376,7 +424,9 @@ def _sign_app_bundle(path: Path) -> None:
     codesign = Path("/usr/bin/codesign")
     if not codesign.exists():
         return
-    result = subprocess.run([str(codesign), "--force", "--deep", "--sign", "-", str(path)], check=False, capture_output=True, text=True)
+    result = subprocess.run(
+        [str(codesign), "--force", "--deep", "--sign", "-", str(path)], check=False, capture_output=True, text=True
+    )
     if result.returncode != 0:
         print(f"Warning: codesign failed: {result.stderr.strip()}", file=sys.stderr)
 
@@ -459,9 +509,7 @@ def _ignore_generated(_: str, names: list[str]) -> set[str]:
 def _ignore_env_noise(_: str, names: list[str]) -> set[str]:
     ignored = set()
     for name in names:
-        if name in {"__pycache__", "share"}:
-            ignored.add(name)
-        elif name.endswith((".pyc", ".pyo", ".a")):
+        if name in {"__pycache__", "share"} or name.endswith((".pyc", ".pyo", ".a")):
             ignored.add(name)
     return ignored
 

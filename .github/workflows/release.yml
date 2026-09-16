@@ -1,0 +1,89 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build sdist + wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install build tooling
+        run: python -m pip install --upgrade pip build
+
+      - name: Verify tag matches package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          python - <<'PY'
+          import os, sys
+          sys.path.insert(0, "src")
+          from netguard._version import __version__
+          tag = os.environ["GITHUB_REF_NAME"].lstrip("v")
+          if tag != __version__:
+              sys.exit(f"tag {tag} 与 netguard._version.__version__ {__version__} 不一致")
+          print(f"版本一致：{__version__}")
+          PY
+
+      - name: Build distributions
+        run: python -m build
+
+      - name: Check metadata
+        run: |
+          python -m pip install --upgrade twine
+          python -m twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  github-release:
+    name: publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      # 取 CHANGELOG 中与本次 tag 对应的小节作为 Release 说明
+      - name: Extract changelog section
+        run: |
+          python - <<'PY'
+          import os, pathlib, re
+          version = os.environ["GITHUB_REF_NAME"].lstrip("v")
+          text = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
+          pattern = re.compile(rf"^##\s*\[?{re.escape(version)}\]?.*?$", re.MULTILINE)
+          match = pattern.search(text)
+          if not match:
+              body = f"版本 {version}（CHANGELOG 中未找到对应小节）"
+          else:
+              rest = text[match.end():]
+              nxt = re.search(r"^##\s", rest, re.MULTILINE)
+              body = (rest[: nxt.start()] if nxt else rest).strip()
+          pathlib.Path("release-notes.md").write_text(body, encoding="utf-8")
+          print(body[:400])
+          PY
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release-notes.md
+          files: dist/*
+          draft: false
+          generate_release_notes: false

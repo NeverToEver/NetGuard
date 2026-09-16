@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import struct
 
-from netguard.trafficgen import TEMPLATES, _checksum
 from netguard.parser.packet import parse_packet
+from netguard.trafficgen import TEMPLATES, _checksum
 
 
 def _ip_header_checksum_ok(raw: bytes) -> bool:

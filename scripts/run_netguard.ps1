@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    NetGuard Windows 启动脚本（自动检测 Python 解释器）。
+    NetGuard Windows 启动脚本。
 
 .DESCRIPTION
-    优先使用环境变量 NETGUARD_PYTHON 指定的解释器，其次项目内
-    .venv\Scripts\python.exe，再回退到 py 启动器与 PATH 上的 python。
-    要求 Python 3.11+。
+    薄封装：只负责找到一个能运行 scripts/launch.py 的 Python，然后原样转交参数。
+    解释器优先级（NETGUARD_PYTHON → 项目内 .venv → PATH）、Python 版本下限校验
+    与环境自检都由 launch.py 完成，避免在多个脚本里重复版本判断。
 
 .EXAMPLE
     .\scripts\run_netguard.ps1
@@ -20,17 +20,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProjectDir = Split-Path -Parent $PSScriptRoot
-$MinVersion = [version]"3.11"
+$Launch = Join-Path $ProjectDir "scripts\launch.py"
 
-function Test-PythonVersion {
-    param([string]$Exe)
-    try {
-        $raw = & $Exe -c "import sys; print('.'.join(map(str, sys.version_info[:3])))" 2>$null
-        if ($LASTEXITCODE -ne 0 -or -not $raw) { return $false }
-        return ([version]$raw -ge $MinVersion)
-    } catch {
-        return $false
-    }
+if (-not (Test-Path $Launch)) {
+    Write-Error "未找到 $Launch，请确认仓库结构完整。"
+    exit 1
 }
 
 function Resolve-Python {
@@ -39,15 +33,11 @@ function Resolve-Python {
     $candidates += (Join-Path $ProjectDir ".venv\Scripts\python.exe")
 
     foreach ($candidate in $candidates) {
-        if ($candidate -and (Test-Path $candidate) -and (Test-PythonVersion $candidate)) {
-            return $candidate
-        }
+        if ($candidate -and (Test-Path $candidate)) { return $candidate }
     }
     foreach ($name in @("py", "python3", "python")) {
         $cmd = Get-Command $name -ErrorAction SilentlyContinue
-        if ($cmd -and (Test-PythonVersion $cmd.Source)) {
-            return $cmd.Source
-        }
+        if ($cmd) { return $cmd.Source }
     }
     return $null
 }
@@ -55,9 +45,9 @@ function Resolve-Python {
 $Python = Resolve-Python
 if (-not $Python) {
     Write-Error @"
-未找到可用的 Python $MinVersion+ 解释器。
+未找到任何 Python 解释器。
 
-请在项目根目录创建虚拟环境：
+请安装 Python 3.11+ 后重试，或在项目根目录创建虚拟环境：
   python -m venv .venv
   .\.venv\Scripts\python.exe -m pip install -e .
 
@@ -67,5 +57,5 @@ if (-not $Python) {
     exit 1
 }
 
-& $Python (Join-Path $ProjectDir "scripts\launch.py") @Args
+& $Python $Launch @Args
 exit $LASTEXITCODE

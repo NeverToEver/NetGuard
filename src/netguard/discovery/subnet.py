@@ -9,8 +9,8 @@ import re
 import socket
 import subprocess
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 logger = logging.getLogger(__name__)
 MAX_SWEEP_HOSTS = 4096
@@ -147,10 +147,11 @@ def ping_sweep(
                     logger.debug("ping %s 异常", host, exc_info=True)
                 completed += 1
                 if on_progress is not None:
+                    # 进度回调由调用方提供（GUI 更新进度条），其异常不应中断扫描
                     try:
                         on_progress(completed, total, host)
                     except Exception:
-                        pass
+                        logger.debug("进度回调异常", exc_info=True)
             if _cancel.is_set():
                 for future in future_map:
                     future.cancel()
@@ -244,7 +245,7 @@ def _split_ipconfig_sections(output: str) -> list[str]:
         sections.append(current)
     if sections:
         return ["\n".join(section) for section in sections]
-    return [section for section in re.split(r'\r?\n\r?\n', output) if section.strip()]
+    return [section for section in re.split(r"\r?\n\r?\n", output) if section.strip()]
 
 
 def _windows_device_matches(section: str, device_name: str) -> bool:
@@ -265,8 +266,8 @@ def _subnets_from_ipconfig_sections(sections: list[str]) -> list[SubnetInfo]:
     result: list[SubnetInfo] = []
     seen: set[str] = set()
     for section in sections:
-        ip_match = re.search(r'IPv4[^:]*:\s*(\d+\.\d+\.\d+\.\d+)', section)
-        mask_match = re.search(r'(?:Subnet Mask|子网掩码)[^:]*:\s*(\d+\.\d+\.\d+\.\d+)', section)
+        ip_match = re.search(r"IPv4[^:]*:\s*(\d+\.\d+\.\d+\.\d+)", section)
+        mask_match = re.search(r"(?:Subnet Mask|子网掩码)[^:]*:\s*(\d+\.\d+\.\d+\.\d+)", section)
         if not (ip_match and mask_match):
             continue
         info = subnet_from_device(ip_match.group(1), mask_match.group(1))
@@ -298,7 +299,7 @@ def resolve_hostname(ip: str, timeout: float = 2.0) -> str | None:
     except concurrent.futures.TimeoutError:
         future.cancel()
         return None
-    except (socket.herror, socket.gaierror, socket.timeout, OSError):
+    except (TimeoutError, socket.herror, socket.gaierror, OSError):
         return None
 
 
@@ -309,9 +310,7 @@ def _resolve_netbios(ip: str, timeout: float = 2.0) -> str | None:
     else:
         cmd = ["nmblookup", "-A", ip]
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, timeout=timeout + 2.0
-        )
+        result = subprocess.run(cmd, capture_output=True, timeout=timeout + 2.0)
         if result.returncode != 0:
             return None
         stderr_text = _decode_output(result.stderr).strip()
@@ -387,10 +386,11 @@ def resolve_hosts(
                     result[ip] = HostInfo(ip=ip)
                 completed += 1
                 if on_progress is not None:
+                    # 进度回调由调用方提供（GUI 更新进度条），其异常不应中断解析
                     try:
                         on_progress(completed, total, ip)
                     except Exception:
-                        pass
+                        logger.debug("进度回调异常", exc_info=True)
             if _cancel.is_set():
                 for future in future_map:
                     future.cancel()
@@ -420,22 +420,20 @@ def _detect_unix_subnets(ifname: str) -> list[SubnetInfo]:
     # 也要回退 ip addr，不能拿空输出直接返回
     if proc is None or proc.returncode != 0:
         try:
-            proc = subprocess.run(
-                ["ip", "addr", "show", ifname], capture_output=True, timeout=5
-            )
+            proc = subprocess.run(["ip", "addr", "show", ifname], capture_output=True, timeout=5)
         except (subprocess.TimeoutExpired, OSError, FileNotFoundError):
             return result
     if proc.returncode != 0:
         return result
     output = _decode_output(proc.stdout)
-    for m in re.finditer(r'inet (\d+\.\d+\.\d+\.\d+).*?netmask (0x[0-9a-fA-F]+)', output):
+    for m in re.finditer(r"inet (\d+\.\d+\.\d+\.\d+).*?netmask (0x[0-9a-fA-F]+)", output):
         ip = m.group(1)
         mask_hex = int(m.group(2), 16)
         netmask = ".".join(str((mask_hex >> (24 - 8 * i)) & 0xFF) for i in range(4))
         info = subnet_from_device(ip, netmask)
         if info:
             result.append(info)
-    for m in re.finditer(r'inet (\d+\.\d+\.\d+\.\d+)/(\d+)', output):
+    for m in re.finditer(r"inet (\d+\.\d+\.\d+\.\d+)/(\d+)", output):
         ip = m.group(1)
         prefix = int(m.group(2))
         mask_int = (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF
@@ -454,8 +452,7 @@ def _detect_windows_subnets(device_name: str, aliases: tuple[str, ...] = ()) -> 
     sections = _split_ipconfig_sections(_decode_output(proc.stdout))
     candidates = tuple(dict.fromkeys(name for name in (device_name, *aliases) if name))
     matching_sections = [
-        section for section in sections
-        if any(_windows_device_matches(section, candidate) for candidate in candidates)
+        section for section in sections if any(_windows_device_matches(section, candidate) for candidate in candidates)
     ]
     matched = _subnets_from_ipconfig_sections(matching_sections)
     return matched or _subnets_from_ipconfig_sections(sections)

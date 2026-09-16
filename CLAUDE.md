@@ -4,35 +4,52 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Development Commands
 
+No `.venv` is present in this workspace. `python` on PATH is 3.11+ with a working
+`tkinter`, so use it directly; create a venv only if you need isolation.
+
 ```bash
-# First-time setup (or let the launcher do it: python scripts/launch.py --setup --no-run)
-/opt/homebrew/bin/python3.12 -m venv .venv
-./.venv/bin/python -m pip install -e .
+# Optional: first-time setup (or let the launcher do it: python scripts/launch.py --setup --no-run)
+python -m venv .venv
+# Windows: .venv\Scripts\activate   |   Unix: source .venv/bin/activate
+python -m pip install -e ".[dev]"
 
 # One-click launch + environment self-check (Windows: NetGuard.bat)
 ./NetGuard.sh
 ./NetGuard.sh --check
 
 # Run the app (GUI mode by default)
-./scripts/run_netguard.sh
+python main.py
 
-# CLI capture preview
-sudo ./scripts/run_netguard.sh --no-gui --interface en0 --bpf "tcp or udp"
+# CLI capture preview (needs elevation: sudo on Unix, Administrator on Windows)
+sudo python main.py --no-gui --interface en0 --bpf "tcp or udp"
 
 # List capture devices
-./scripts/run_netguard.sh --list-devices
+python main.py --list-devices
+
+# Offline replay (no libpcap / no root needed)
+python main.py --read capture.pcap
 
 # Run all tests
-./.venv/bin/python -m pytest tests/ -v
+python -m pytest tests/ -v
 
 # Run a single test file
-./.venv/bin/python -m pytest tests/test_parser.py -v
+python -m pytest tests/test_parser.py -v
 
-# Package as standalone macOS .app / Unix portable directory
-python3 scripts/build_unix_app.py --python-env .venv
+# Quality gates (see CONTRIBUTING.md)
+python -m ruff check src tests scripts main.py
+python -m ruff format --check src tests scripts main.py
+python -m mypy
+python -m pytest tests/ --cov=netguard
+
+# Package as standalone macOS .app / Unix portable directory (macOS only)
+python scripts/build_unix_app.py --python-env .venv
 ```
 
-Requirements: Python 3.11+. The start script auto-detects the interpreter from `.venv`, Homebrew paths, or the `NETGUARD_PYTHON` env var.
+Requirements: Python 3.11+. `scripts/launch.py` is the single entry point and owns
+interpreter selection (`NETGUARD_PYTHON` > repo `.venv` > current) plus the version
+check; the shell/batch wrappers only find a Python to run it.
+`scripts/run_netguard.sh` is POSIX only — on Windows use `NetGuard.bat` or
+`scripts/run_netguard.ps1`.
 
 ## Architecture
 

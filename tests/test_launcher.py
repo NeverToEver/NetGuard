@@ -3,6 +3,7 @@
 只验证纯逻辑（解释器探测、自检输出、参数路由），不真正拉起 GUI 或子进程，
 因此无需 libpcap / root / 显示环境。
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -60,6 +61,21 @@ def test_project_paths_exist(launch) -> None:
     assert launch.MAIN_PY == ROOT / "main.py"
     assert launch.MAIN_PY.is_file()
     assert (launch.SRC_DIR / "netguard").is_dir()
+
+
+def test_netguard_python_env_overrides(launch, monkeypatch, tmp_path) -> None:
+    """NETGUARD_PYTHON 指定的解释器优先于 .venv 与当前解释器。"""
+    fake = tmp_path / ("python.exe" if sys.platform == "win32" else "python")
+    fake.write_text("", encoding="utf-8")
+    monkeypatch.setenv("NETGUARD_PYTHON", str(fake))
+    assert launch.select_interpreter() == fake
+
+
+def test_netguard_python_env_missing_path_falls_back(launch, monkeypatch, tmp_path) -> None:
+    """NETGUARD_PYTHON 指向不存在的路径时回退，不应抛异常。"""
+    monkeypatch.setenv("NETGUARD_PYTHON", str(tmp_path / "nope" / "python"))
+    monkeypatch.setattr(launch, "venv_python", lambda *a, **k: tmp_path / "absent")
+    assert launch.select_interpreter() == Path(sys.executable)
 
 
 def test_run_check_returns_int(launch, capsys) -> None:

@@ -54,10 +54,15 @@ def test_corrupt_file_falls_back_to_defaults(tmp_path) -> None:
 
 def test_malformed_window_section_is_ignored(tmp_path) -> None:
     path = tmp_path / "weird.json"
-    path.write_text(json.dumps({
-        "theme_mode": "dark",
-        "window": {"sashes": {"a": ["x"]}, "columns": {"time": "abc"}, "bpf": 123},
-    }), encoding="utf-8")
+    path.write_text(
+        json.dumps(
+            {
+                "theme_mode": "dark",
+                "window": {"sashes": {"a": ["x"]}, "columns": {"time": "abc"}, "bpf": 123},
+            }
+        ),
+        encoding="utf-8",
+    )
     config = AppConfig.load(path)
     assert config.theme_mode == "dark"
     assert config.window.sashes == {}
