@@ -408,7 +408,9 @@ class NetGuardApp(tk.Tk):
             return
         for index in range(self.alerts.size()):
             try:
-                self.alerts.itemconfigure(index, fg=self._alert_color(self.alerts.get(index, index)))
+                # 必须用单参数 get：Listbox.get(first, last) 返回元组，会把
+                # 元组喂给 _alert_color 触发 AttributeError
+                self.alerts.itemconfigure(index, fg=self._alert_color(self.alerts.get(index)))
             except tk.TclError:
                 return
 
