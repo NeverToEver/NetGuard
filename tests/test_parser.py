@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import struct
 
-from netguard.parser import parse_packet, hex_dump, PacketInfo
+from netguard.parser import PacketInfo, hex_dump, parse_packet
 
 
 def ethernet(payload: bytes, ethertype: int = 0x0800) -> bytes:
@@ -35,6 +35,7 @@ def udp(payload: bytes, src_port: int = 53000, dst_port: int = 53) -> bytes:
 
 
 # --- HTTP tests ---
+
 
 def test_parse_http_packet() -> None:
     raw = ethernet(ipv4(tcp(b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")))
@@ -75,12 +76,9 @@ def test_http_port_payload_without_http_version_stays_tcp() -> None:
 
 # --- DNS tests ---
 
+
 def test_parse_dns_query() -> None:
-    dns = (
-        struct.pack("!HHHHHH", 1, 0x0100, 1, 0, 0, 0)
-        + b"\x07example\x03com\x00"
-        + struct.pack("!HH", 1, 1)
-    )
+    dns = struct.pack("!HHHHHH", 1, 0x0100, 1, 0, 0, 0) + b"\x07example\x03com\x00" + struct.pack("!HH", 1, 1)
     raw = ethernet(ipv4(udp(dns), proto=17))
     packet = parse_packet(raw)
     assert packet.protocol == "DNS"
@@ -109,6 +107,7 @@ def test_parse_dns_truncated_header() -> None:
 
 
 # --- TCP flag tests ---
+
 
 def test_parse_tcp_syn_packet() -> None:
     raw = ethernet(ipv4(tcp(b"", flags=0x002)))
@@ -143,6 +142,7 @@ def test_parse_tcp_all_flags() -> None:
 
 
 # --- Edge case tests ---
+
 
 def test_truncated_packet_returns_issue() -> None:
     packet = parse_packet(b"\x00\x01")
@@ -263,26 +263,26 @@ def test_session_key_returns_none_for_udp() -> None:
 
 
 def test_session_key_returns_tuple_for_tcp() -> None:
-    pkt = PacketInfo(timestamp=0, length=10, raw=b"", protocol="TCP",
-                     src="1.2.3.4", dst="5.6.7.8", src_port=80, dst_port=443)
+    pkt = PacketInfo(
+        timestamp=0, length=10, raw=b"", protocol="TCP", src="1.2.3.4", dst="5.6.7.8", src_port=80, dst_port=443
+    )
     assert pkt.session_key == ("1.2.3.4", 80, "5.6.7.8", 443)
 
 
 # --- 非标准端口协议识别 ---
 
+
 def _tcp_raw(src_port: int, dst_port: int, payload: bytes) -> bytes:
     tcp = struct.pack("!HHIIHHHH", src_port, dst_port, 1, 0, (5 << 12) | 0x18, 1024, 0, 0) + payload
     ip_total = 20 + len(tcp)
-    ip = struct.pack("!BBHHHBBH4s4s", 0x45, 0, ip_total, 1, 0, 64, 6, 0,
-                     b"\x0a\x00\x00\x01", b"\x0a\x00\x00\x02")
+    ip = struct.pack("!BBHHHBBH4s4s", 0x45, 0, ip_total, 1, 0, 64, 6, 0, b"\x0a\x00\x00\x01", b"\x0a\x00\x00\x02")
     return b"\xaa" * 12 + b"\x08\x00" + ip + tcp
 
 
 def _udp_raw(src_port: int, dst_port: int, payload: bytes) -> bytes:
     udp = struct.pack("!HHHH", src_port, dst_port, 8 + len(payload), 0) + payload
     ip_total = 20 + len(udp)
-    ip = struct.pack("!BBHHHBBH4s4s", 0x45, 0, ip_total, 1, 0, 64, 17, 0,
-                     b"\x0a\x00\x00\x01", b"\x0a\x00\x00\x02")
+    ip = struct.pack("!BBHHHBBH4s4s", 0x45, 0, ip_total, 1, 0, 64, 17, 0, b"\x0a\x00\x00\x01", b"\x0a\x00\x00\x02")
     return b"\xaa" * 12 + b"\x08\x00" + ip + udp
 
 
@@ -337,6 +337,7 @@ def test_http_header_value_truncated() -> None:
 
 # --- VLAN (802.1Q / QinQ) ---
 
+
 def _vlan_tag(vid: int) -> bytes:
     # 802.1Q 头 = TPID(0x8100) + TCI；解析器读 TCI 后取下 2 字节为内层 EtherType
     return struct.pack("!HH", 0x8100, vid)
@@ -344,8 +345,7 @@ def _vlan_tag(vid: int) -> bytes:
 
 def _tagged_frame(*tags: bytes, ethertype: int = 0x0800, payload: bytes = b"") -> bytes:
     macs = b"\xaa\xbb\xcc\xdd\xee\xff" + b"\x11\x22\x33\x44\x55\x66"
-    frame = macs + b"".join(tags) + struct.pack("!H", ethertype) + payload
-    return frame
+    return macs + b"".join(tags) + struct.pack("!H", ethertype) + payload
 
 
 def test_vlan_tagged_tcp_packet_parses() -> None:
@@ -361,7 +361,7 @@ def test_qinq_double_tagged_packet_parses() -> None:
     inner = ipv4(tcp(b"", flags=0x002))
     frame = _tagged_frame(
         struct.pack("!HH", 0x88A8, 200),  # 外层 802.1ad TPID+TCI
-        _vlan_tag(300),                   # 内层 802.1Q TPID+TCI
+        _vlan_tag(300),  # 内层 802.1Q TPID+TCI
         payload=inner,
     )
     info = parse_packet(frame)

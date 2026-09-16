@@ -63,6 +63,7 @@ def dns_packet(name: str, timestamp: float = 0.0) -> PacketInfo:
 
 # --- SYN flood ---
 
+
 def test_syn_flood_triggers_at_threshold() -> None:
     clock = FakeClock()
     detector = SynFloodDetector(clock, window_seconds=5.0, threshold=5)
@@ -91,7 +92,7 @@ def test_syn_flood_window_expiry_resets_count() -> None:
     clock = FakeClock()
     detector = SynFloodDetector(clock, window_seconds=1.0, threshold=5)
 
-    for i in range(4):
+    for _ in range(4):
         detector.observe(tcp_packet(timestamp=0.0))
     # 超过窗口后早期 SYN 应过期
     alerts = detector.observe(tcp_packet(timestamp=10.0))
@@ -109,6 +110,7 @@ def test_syn_flood_alerts_only_once_per_window() -> None:
 
 
 # --- Port scan ---
+
 
 def test_port_scan_triggers_on_distinct_ports() -> None:
     clock = FakeClock()
@@ -131,6 +133,7 @@ def test_port_scan_repeated_same_port_does_not_trigger() -> None:
 
 
 # --- DNS tunnel ---
+
 
 def test_dns_tunnel_flags_overlong_name() -> None:
     clock = FakeClock()
@@ -189,6 +192,7 @@ def test_port_scan_window_is_bounded_under_high_volume() -> None:
 
 # --- ICMP flood ---
 
+
 def icmp_packet(src: str = "10.0.0.1", dst: str = "10.0.0.2", timestamp: float = 0.0) -> PacketInfo:
     return PacketInfo(
         timestamp=timestamp,
@@ -242,15 +246,14 @@ def test_icmp_flood_alert_suppressed_within_window() -> None:
 
 # --- 暴力破解 ---
 
+
 def test_brute_force_triggers_at_threshold() -> None:
     clock = FakeClock()
     detector = BruteForceDetector(clock, window_seconds=60.0, threshold=5)
 
     alerts = []
     for i in range(5):
-        alerts = detector.observe(
-            tcp_packet(flags=["SYN"], dst_port=22, src_port=20000 + i, timestamp=float(i))
-        )
+        alerts = detector.observe(tcp_packet(flags=["SYN"], dst_port=22, src_port=20000 + i, timestamp=float(i)))
 
     assert len(alerts) == 1
     assert "暴力破解" in alerts[0].msg
@@ -291,5 +294,9 @@ def test_new_detectors_reset_clears_state() -> None:
 def test_build_default_detectors_includes_new_detectors() -> None:
     detectors = build_default_detectors(FakeClock())
     assert {d.name for d in detectors} == {
-        "syn-flood", "port-scan", "dns-tunnel", "icmp-flood", "brute-force",
+        "syn-flood",
+        "port-scan",
+        "dns-tunnel",
+        "icmp-flood",
+        "brute-force",
     }

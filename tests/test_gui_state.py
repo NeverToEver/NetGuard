@@ -59,7 +59,9 @@ class FakeTable:
         self.rows: list[str] = []
         self._selection = selection
 
-    def insert(self, parent: str, index: int | str, iid: str, tags: tuple[str, ...], values: tuple[object, ...]) -> None:
+    def insert(
+        self, parent: str, index: int | str, iid: str, tags: tuple[str, ...], values: tuple[object, ...]
+    ) -> None:
         self.rows.append(iid)
 
     def delete(self, *items: str) -> None:

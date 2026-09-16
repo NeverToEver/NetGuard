@@ -5,9 +5,15 @@ import logging
 import os
 import sys
 import time
+from contextlib import suppress
+from typing import TYPE_CHECKING
 
-from netguard.capture.pcap import PcapError, create_backend
 from netguard.capture.interface_mapping import build_device_displays
+from netguard.capture.pcap import PcapError, create_backend
+
+if TYPE_CHECKING:
+    from netguard.parser.packet import PacketInfo
+    from netguard.processing import PacketEvent
 
 os.environ.setdefault("TK_SILENCE_DEPRECATION", "1")
 
@@ -56,7 +62,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(2)
     if not (args.no_gui or args.read):
         ignored = [
-            flag for flag in ("--bpf", "--write", "--alerts-json", "--rules")
+            flag
+            for flag in ("--bpf", "--write", "--alerts-json", "--rules")
             if getattr(args, flag.strip("-").replace("-", "_"), None)
         ]
         if ignored:
@@ -80,29 +87,28 @@ def main(argv: list[str] | None = None) -> None:
                         rule_text = handle.read()
                 except OSError as exc:
                     print(f"无法读取规则文件：{exc}", file=sys.stderr)
-                    raise SystemExit(2)
+                    raise SystemExit(2) from exc
             else:
                 rule_text = DEFAULT_RULES
             failed = pipeline.load_rules(rule_text)
             print(f"已加载 {pipeline.rule_count} 条 IDS 规则" + (f"（跳过 {failed} 条无效）" if failed else ""))
 
-            collected: list = []
-            alert_records: list = []
+            collected: list[PacketInfo] = []
+            alert_records: list[dict[str, object]] = []
 
-            def on_packet(event):
+            def on_packet(event: PacketEvent) -> None:
                 pkt = event.packet
                 if args.alerts_json:
                     for alert in event.alerts:
                         alert_records.append(alert.to_dict())
                 if args.write is not None:
                     collected.append(pkt)
-                print(
-                    f"{pkt.timestamp:.3f} {pkt.src} -> {pkt.dst} "
-                    f"{pkt.protocol} len={pkt.length} {pkt.summary}"
-                )
+                print(f"{pkt.timestamp:.3f} {pkt.src} -> {pkt.dst} {pkt.protocol} len={pkt.length} {pkt.summary}")
                 for alert in event.alerts:
-                    print(f"[ALERT] {alert.timestamp:.3f} {alert.msg} "
-                          f"({alert.src}:{alert.src_port} -> {alert.dst}:{alert.dst_port})")
+                    print(
+                        f"[ALERT] {alert.timestamp:.3f} {alert.msg} "
+                        f"({alert.src}:{alert.src_port} -> {alert.dst}:{alert.dst_port})"
+                    )
 
             pipeline.on_packet = on_packet
             exit_code = 0
@@ -146,9 +152,7 @@ def main(argv: list[str] | None = None) -> None:
                 from netguard.capture.pcap import RawPacket
                 from netguard.capture.pcap_file import write_pcap
 
-                raws = [
-                    RawPacket(p.timestamp, p.raw, len(p.raw), p.length) for p in collected
-                ]
+                raws = [RawPacket(p.timestamp, p.raw, len(p.raw), p.length) for p in collected]
                 try:
                     count = write_pcap(args.write, raws)
                 except OSError as exc:
@@ -167,16 +171,14 @@ def main(argv: list[str] | None = None) -> None:
             return
         from netguard.gui.main_ui import run_gui
 
-        try:
+        with suppress(KeyboardInterrupt):
             run_gui()
-        except KeyboardInterrupt:
-            pass
     except PcapError as exc:
         print(f"pcap 错误：{exc}", file=sys.stderr)
         raise SystemExit(1) from exc
 
 
-def _write_alerts_json(path: str, records: list) -> None:
+def _write_alerts_json(path: str, records: list[dict[str, object]]) -> None:
     import json
 
     with open(path, "w", encoding="utf-8") as handle:

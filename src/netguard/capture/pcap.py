@@ -7,8 +7,9 @@ import platform
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Protocol
+from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +20,7 @@ class PcapBackendProtocol(Protocol):
     def list_devices(self) -> list[CaptureDevice]: ...
     def open(self, device: str, bpf_filter: str = "", promiscuous: bool = True, timeout_ms: int = 100) -> None: ...
     def set_filter(self, bpf_filter: str) -> None: ...
-    def capture_loop(self, callback: Callable[[RawPacket], None]) -> None: ...
+    def capture_loop(self, callback: Callable[[RawPacket], object]) -> None: ...
     def stop(self) -> None: ...
     def close(self) -> None: ...
 
@@ -157,7 +158,9 @@ def _extract_device_addresses(item: pcap_if_t) -> tuple[list[str], list[str]]:
     return ips, netmasks
 
 
-def _is_inet(sa_ptr: "ctypes.POINTER(sockaddr)") -> bool:
+def _is_inet(sa_ptr: Any) -> bool:
+    # typeshed 把 ctypes.POINTER 声明为函数而非泛型类，无法用作类型注解；
+    # 此处是 ctypes 交互边界，参数实际为 POINTER(sockaddr) 实例
     return bool(sa_ptr) and sa_ptr.contents.sa_family == _AF_INET
 
 
@@ -323,7 +326,7 @@ class PcapBackend:
         finally:
             self.lib.pcap_freecode(ctypes.byref(program))
 
-    def capture_loop(self, callback: Callable[[RawPacket], None]) -> None:
+    def capture_loop(self, callback: Callable[[RawPacket], object]) -> None:
         with self._handle_lock:
             handle = self._handle
         if handle is None:
@@ -354,7 +357,7 @@ class PcapBackend:
 
     _STATS_POLL_INTERVAL = 200
 
-    def _poll_kernel_stats(self, handle) -> None:
+    def _poll_kernel_stats(self, handle: ctypes.c_void_p) -> None:
         """周期采样 pcap_stats，把内核/BPF 缓冲区丢弃并入丢包统计。"""
         if not self._has_pcap_stats:
             return

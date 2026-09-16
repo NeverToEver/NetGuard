@@ -90,7 +90,7 @@ def test_stopped_parse_thread_is_not_revived_by_restart() -> None:
     pipeline2._start_parse_thread()
     zombie = pipeline2._threads[0]
     pipeline2._parse_stop.set()  # 等价 stop 的置位步骤
-    pipeline2._threads = []      # 等价 join 超时后的放弃
+    pipeline2._threads = []  # 等价 join 超时后的放弃
     pipeline2._parse_stop = threading.Event()
     pipeline2.source.enqueue_raw(_raw(1.0, _GOOD_FRAME))
     pipeline2._start_parse_thread()

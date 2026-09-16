@@ -3,6 +3,7 @@
 只验证纯逻辑（解释器探测、自检输出、参数路由），不真正拉起 GUI 或子进程，
 因此无需 libpcap / root / 显示环境。
 """
+
 from __future__ import annotations
 
 import importlib.util

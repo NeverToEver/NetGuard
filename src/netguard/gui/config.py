@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -76,7 +77,7 @@ class AppConfig:
     _extra: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def load(cls, path: Path | str = CONFIG_PATH) -> "AppConfig":
+    def load(cls, path: Path | str = CONFIG_PATH) -> AppConfig:
         config = cls(path=Path(path))
         try:
             # utf-8-sig 兼容带 BOM 的文件（Windows 记事本 "UTF-8 with BOM"）
@@ -173,7 +174,5 @@ class AppConfig:
             os.replace(tmp_path, self.path)
         except OSError:
             logger.warning("无法保存配置文件 %s", self.path, exc_info=True)
-            try:
+            with suppress(OSError):
                 tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass

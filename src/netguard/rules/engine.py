@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import ipaddress
 import logging
 import re
 import threading
 from dataclasses import dataclass
-import ipaddress
+from typing import Any
 
 from netguard.clock import Clock, system_clock
 from netguard.parser.packet import PacketInfo
@@ -92,7 +93,7 @@ class RuleEngine:
         self._clock = clock
         self._lock = threading.Lock()
         # 无会话协议（UDP/DNS）内容告警的时间窗抑制表：{(规则键, 五元组): 最近告警时间}
-        self._flow_alerted: dict[tuple[str, tuple], float] = {}
+        self._flow_alerted: dict[tuple[str, tuple[Any, ...]], float] = {}
         if rules:
             self.load(rules)
 
@@ -117,11 +118,10 @@ class RuleEngine:
         if len(option_issues) > 20:
             logger.warning("另有 %d 条规则选项提示已省略", len(option_issues) - 20)
         _temp: dict[str, dict[str, list[Rule]]] = {}
-        for rule in parsed:
-            _temp.setdefault(rule.protocol, {}).setdefault(_rule_port_key(rule), []).append(rule)
+        for parsed_rule in parsed:
+            _temp.setdefault(parsed_rule.protocol, {}).setdefault(_rule_port_key(parsed_rule), []).append(parsed_rule)
         index: dict[str, dict[str, tuple[Rule, ...]]] = {
-            proto: {port: tuple(bucket) for port, bucket in ports.items()}
-            for proto, ports in _temp.items()
+            proto: {port: tuple(bucket) for port, bucket in ports.items()} for proto, ports in _temp.items()
         }
         # 原子替换：match() 在锁内读取 self.index，此处双赋值在同一个锁内完成，不会出现半替换状态
         with self._lock:
@@ -133,7 +133,7 @@ class RuleEngine:
     def match(
         self,
         packet: PacketInfo,
-        stream: bytes | None = None,
+        stream: bytes | bytearray | None = None,
         matched: set[str] | None = None,
     ) -> list[Alert]:
         protocol = packet.protocol.upper()
@@ -164,9 +164,7 @@ class RuleEngine:
         last = self._flow_alerted.get((_rule_key(rule), _flow_key(packet)))
         return last is not None and now - last < _FLOW_ALERT_WINDOW_SECONDS
 
-    def _mark_content_alerted(
-        self, rule: Rule, packet: PacketInfo, matched: set[str] | None, now: float
-    ) -> None:
+    def _mark_content_alerted(self, rule: Rule, packet: PacketInfo, matched: set[str] | None, now: float) -> None:
         if not rule.content:
             return
         if matched is not None:
@@ -176,7 +174,7 @@ class RuleEngine:
         overflow = len(self._flow_alerted) - _MAX_FLOW_ALERT_KEYS
         if overflow > 0:
             evict_count = max(overflow, _MAX_FLOW_ALERT_KEYS // 10)
-            oldest = sorted(self._flow_alerted, key=self._flow_alerted.get)[:evict_count]
+            oldest = sorted(self._flow_alerted, key=lambda k: self._flow_alerted[k])[:evict_count]
             for key in oldest:
                 self._flow_alerted.pop(key, None)
 
@@ -208,7 +206,7 @@ class RuleEngine:
         self,
         rule: Rule,
         packet: PacketInfo,
-        stream: bytes | None,
+        stream: bytes | bytearray | None,
         matched: set[str] | None,
     ) -> bool:
         """内容规则的回退匹配：在整个 TCP 会话重组流中查找。
@@ -241,9 +239,7 @@ class RuleEngine:
     def _matches(self, rule: Rule, packet: PacketInfo) -> bool:
         if not self._endpoint_and_proto_match(rule, packet):
             return False
-        if rule.content and not _content_in(rule, packet.payload) and not _content_in(rule, packet.raw):
-            return False
-        return True
+        return not (rule.content and not _content_in(rule, packet.payload) and not _content_in(rule, packet.raw))
 
     def _build_alert(self, rule: Rule, packet: PacketInfo) -> Alert:
         return Alert(
@@ -259,10 +255,7 @@ class RuleEngine:
 
 
 def _rule_key(rule: Rule) -> str:
-    return (
-        f"{rule.protocol}|{rule.src}|{rule.src_port}|{rule.direction}"
-        f"|{rule.dst}|{rule.dst_port}|{rule.content!r}"
-    )
+    return f"{rule.protocol}|{rule.src}|{rule.src_port}|{rule.direction}|{rule.dst}|{rule.dst_port}|{rule.content!r}"
 
 
 def _rule_port_key(rule: Rule) -> str:
@@ -290,10 +283,7 @@ def parse_rule(text: str, issues: list[str] | None = None) -> Rule:
         if "$" in match.group(field):
             # Snort 变量需要网络定义上下文，引擎无法解析；静默忽略会变成
             # "解析成功但永不命中"的死规则，必须显式报错
-            raise RuleParseError(
-                f"规则使用了不支持的 Snort 变量 {{{match.group(field)}}}，"
-                "请改为具体地址/端口"
-            )
+            raise RuleParseError(f"规则使用了不支持的 Snort 变量 {{{match.group(field)}}}，请改为具体地址/端口")
     opts = _parse_options(match.group("opts"), issues)
     content = opts.get("content")
     if content is not None and not content:
@@ -379,7 +369,7 @@ def _split_options(text: str) -> tuple[list[str], bool]:
     return parts, not in_quotes and not escaped
 
 
-def _content_in(rule: Rule, data: bytes) -> bool:
+def _content_in(rule: Rule, data: bytes | bytearray) -> bool:
     if rule.content is None:
         return False
     if rule.nocase:
@@ -387,7 +377,7 @@ def _content_in(rule: Rule, data: bytes) -> bool:
     return rule.content in data
 
 
-def _flow_key(packet: PacketInfo) -> tuple:
+def _flow_key(packet: PacketInfo) -> tuple[str, int | None, str, int | None]:
     return (packet.src, packet.src_port, packet.dst, packet.dst_port)
 
 

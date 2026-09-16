@@ -36,7 +36,8 @@ def _dedupe_display_names(displays: list[DeviceDisplay]) -> list[DeviceDisplay]:
         counts[display.display_name] = counts.get(display.display_name, 0) + 1
     return [
         replace(display, display_name=f"{display.display_name} - {display.device.name}")
-        if counts[display.display_name] > 1 else display
+        if counts[display.display_name] > 1
+        else display
         for display in displays
     ]
 

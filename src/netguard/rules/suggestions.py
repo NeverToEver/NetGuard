@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 from netguard.parser.packet import HTTP_PORTS, PacketInfo
 from netguard.rules.engine import parse_rule
@@ -109,7 +109,9 @@ def _http_candidates(packet: PacketInfo) -> list[_Candidate]:
                 f"检测到 HTTP Host {host}",
             )
         )
-    candidates.append(_port_candidate(70, "HTTP 端口匹配", "只按 TCP 端口匹配，范围更宽。", packet, "检测到 HTTP 端口流量"))
+    candidates.append(
+        _port_candidate(70, "HTTP 端口匹配", "只按 TCP 端口匹配，范围更宽。", packet, "检测到 HTTP 端口流量")
+    )
     candidates.extend(_generic_payload_candidates(packet, start_priority=80))
     return candidates
 
@@ -130,13 +132,17 @@ def _dns_candidates(packet: PacketInfo) -> list[_Candidate]:
                     f"检测到 DNS 查询 {name}",
                 )
             )
-    candidates.append(_port_candidate(40, "DNS 端口匹配", "只按 UDP 53 端口匹配，可覆盖普通 DNS 查询。", packet, "检测到 DNS 流量"))
+    candidates.append(
+        _port_candidate(40, "DNS 端口匹配", "只按 UDP 53 端口匹配，可覆盖普通 DNS 查询。", packet, "检测到 DNS 流量")
+    )
     return candidates
 
 
 def _generic_candidates(packet: PacketInfo) -> list[_Candidate]:
     return [
-        _port_candidate(50, f"{packet.protocol} 端口匹配", "按协议和端口匹配当前流量。", packet, f"检测到 {packet.protocol} 流量"),
+        _port_candidate(
+            50, f"{packet.protocol} 端口匹配", "按协议和端口匹配当前流量。", packet, f"检测到 {packet.protocol} 流量"
+        ),
         *_generic_payload_candidates(packet, start_priority=60),
     ]
 
@@ -228,9 +234,7 @@ def _payload_keywords(payload: bytes) -> list[str]:
 
 def _clean_option_text(value: str, max_length: int) -> str:
     # 反斜杠必须清除：content 值尾部残留 "\" 会转义闭引号，吞掉后续选项区
-    cleaned = "".join(
-        ch for ch in value.replace("\\", "").replace('"', "'").replace(";", ",") if ch >= " "
-    )
+    cleaned = "".join(ch for ch in value.replace("\\", "").replace('"', "'").replace(";", ",") if ch >= " ")
     return cleaned[:max_length]
 
 
@@ -243,9 +247,13 @@ def _count_matches(rule_text: str, packets: list[PacketInfo]) -> int:
     count = 0
     for p in packets:
         proto = p.protocol.upper()
-        if rule_proto != "ANY" and rule_proto != proto:
-            if not (rule_proto == "TCP" and proto == "HTTP") and not (rule_proto == "UDP" and proto == "DNS"):
-                continue
+        if (
+            rule_proto != "ANY"
+            and rule_proto != proto
+            and not (rule_proto == "TCP" and proto == "HTTP")
+            and not (rule_proto == "UDP" and proto == "DNS")
+        ):
+            continue
         if rule_src_port != "any":
             if p.src_port is None:
                 continue

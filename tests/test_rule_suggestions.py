@@ -12,7 +12,10 @@ def ethernet(payload: bytes) -> bytes:
 
 def ipv4(payload: bytes, proto: int = 6) -> bytes:
     total = 20 + len(payload)
-    return struct.pack("!BBHHHBBH4s4s", 0x45, 0, total, 1, 0, 64, proto, 0, b"\x0a\x00\x00\x01", b"\x0a\x00\x00\x02") + payload
+    return (
+        struct.pack("!BBHHHBBH4s4s", 0x45, 0, total, 1, 0, 64, proto, 0, b"\x0a\x00\x00\x01", b"\x0a\x00\x00\x02")
+        + payload
+    )
 
 
 def tcp(payload: bytes, src_port: int = 12345, dst_port: int = 80) -> bytes:
@@ -35,11 +38,7 @@ def test_generate_http_rule_suggestions() -> None:
 
 
 def test_generate_dns_rule_suggestions() -> None:
-    dns = (
-        struct.pack("!HHHHHH", 1, 0x0100, 1, 0, 0, 0)
-        + b"\x07example\x03com\x00"
-        + struct.pack("!HH", 1, 1)
-    )
+    dns = struct.pack("!HHHHHH", 1, 0x0100, 1, 0, 0, 0) + b"\x07example\x03com\x00" + struct.pack("!HH", 1, 1)
     packet = parse_packet(ethernet(ipv4(udp(dns), proto=17)))
 
     suggestions = generate_rule_suggestions([packet])

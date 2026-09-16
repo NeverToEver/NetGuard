@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from netguard.capture.pcap import RawPacket
 from netguard.clock import Clock, system_clock

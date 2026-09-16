@@ -172,12 +172,17 @@ def bench_rule_match(engine: RuleEngine, packet_bytes: list[bytes], repeats: int
 
 # --- 检测能力评估 ---------------------------------------------------------
 
+
 def eval_syn_flood() -> dict:
     clock = ManualClock()
     detector = SynFloodDetector(clock, window_seconds=5.0, threshold=100)
     src_pkt = struct.pack("!HHIIHHHH", 40000, 80, 1, 0, (5 << 12) | 0x02, 1024, 0, 0)
-    raw = b"\xaa" * 12 + b"\x08\x00" + struct.pack("!BBHHHBBH4s4s", 0x45, 0, 40, 1, 0, 64, 6, 0,
-          b"\x0a\x00\x00\x01", b"\x0a\x00\x00\x02") + src_pkt
+    raw = (
+        b"\xaa" * 12
+        + b"\x08\x00"
+        + struct.pack("!BBHHHBBH4s4s", 0x45, 0, 40, 1, 0, 64, 6, 0, b"\x0a\x00\x00\x01", b"\x0a\x00\x00\x02")
+        + src_pkt
+    )
     detected = False
     for i in range(150):
         pkt = parse_packet(raw, timestamp=float(i) * 0.01)
@@ -193,8 +198,12 @@ def eval_port_scan() -> dict:
     detected = False
     for port in range(1, 40):
         tcp = struct.pack("!HHIIHHHH", 40000 + port, port, 1, 0, (5 << 12) | 0x02, 1024, 0, 0)
-        raw = b"\xaa" * 12 + b"\x08\x00" + struct.pack("!BBHHHBBH4s4s", 0x45, 0, 40, 1, 0, 64, 6, 0,
-              b"\x0a\x00\x00\x01", b"\x0a\x00\x00\x02") + tcp
+        raw = (
+            b"\xaa" * 12
+            + b"\x08\x00"
+            + struct.pack("!BBHHHBBH4s4s", 0x45, 0, 40, 1, 0, 64, 6, 0, b"\x0a\x00\x00\x01", b"\x0a\x00\x00\x02")
+            + tcp
+        )
         pkt = parse_packet(raw, timestamp=float(port) * 0.01)
         if detector.observe(pkt):
             detected = True
@@ -213,8 +222,14 @@ def eval_dns_tunnel() -> dict:
         name = b"".join(bytes([len(p)]) + p.encode() for p in parts) + b"\x00"
         payload = struct.pack("!HHHHHH", i, 0x0100, 1, 0, 0, 0) + name + struct.pack("!HH", 1, 1)
         udp = struct.pack("!HHHH", 53000, 53, 8 + len(payload), 0) + payload
-        raw = b"\xaa" * 12 + b"\x08\x00" + struct.pack("!BBHHHBBH4s4s", 0x45, 0, 20 + len(udp), 1, 0, 64, 17, 0,
-              b"\x0a\x00\x00\x01", b"\x0a\x00\x00\x02") + udp
+        raw = (
+            b"\xaa" * 12
+            + b"\x08\x00"
+            + struct.pack(
+                "!BBHHHBBH4s4s", 0x45, 0, 20 + len(udp), 1, 0, 64, 17, 0, b"\x0a\x00\x00\x01", b"\x0a\x00\x00\x02"
+            )
+            + udp
+        )
         pkt = parse_packet(raw, timestamp=float(i) * 0.01)
         if detector.observe(pkt):
             detected = True
@@ -285,9 +300,11 @@ def main() -> int:
     print(f"[1/5] 协议解析（{len(packet_bytes) * parse_repeats:,} 包）...")
     parse_result = bench_parse(packet_bytes, parse_repeats)
     results["parse"] = parse_result
-    print(f"      {parse_result['packets_per_second']:>12,.0f} 包/秒   "
-          f"{_fmt_bytes(parse_result['bytes_per_second']):>10}/秒   "
-          f"{parse_result['us_per_packet']:.2f} µs/包")
+    print(
+        f"      {parse_result['packets_per_second']:>12,.0f} 包/秒   "
+        f"{_fmt_bytes(parse_result['bytes_per_second']):>10}/秒   "
+        f"{parse_result['us_per_packet']:.2f} µs/包"
+    )
 
     # 2. 流水线（解析+会话+规则+检测）
     print(f"[2/5] 端到端流水线（{len(packet_bytes) * parse_repeats:,} 包）...")
@@ -297,8 +314,10 @@ def main() -> int:
     processor.load_rules(_default_rules())
     pipeline_result = bench_pipeline(processor, packet_bytes, parse_repeats)
     results["pipeline"] = pipeline_result
-    print(f"      {pipeline_result['packets_per_second']:>12,.0f} 包/秒   "
-          f"{_fmt_bytes(pipeline_result['bytes_per_second']):>10}/秒")
+    print(
+        f"      {pipeline_result['packets_per_second']:>12,.0f} 包/秒   "
+        f"{_fmt_bytes(pipeline_result['bytes_per_second']):>10}/秒"
+    )
 
     # 3. 规则匹配延迟
     rule_count = args.rules
@@ -307,22 +326,34 @@ def main() -> int:
     print(f"[3/5] 规则匹配延迟（{rule_count} 条规则）...")
     match_result = bench_rule_match(engine, packet_bytes, max(50, parse_repeats // 4))
     results["rule_match"] = match_result
-    print(f"      平均 {match_result['mean_us']:.2f} µs   中位 {match_result['median_us']:.2f} µs   "
-          f"P99 {match_result['p99_us']:.2f} µs")
+    print(
+        f"      平均 {match_result['mean_us']:.2f} µs   中位 {match_result['median_us']:.2f} µs   "
+        f"P99 {match_result['p99_us']:.2f} µs"
+    )
 
     # 4. 内存
     print("[4/5] 内存占用...")
     rss_before = _rss_bytes()
     processor2 = PacketProcessor()
-    packets = [RawPacket(1.0 + i * 1e-6, packet_bytes[i % len(packet_bytes)],
-                         len(packet_bytes[i % len(packet_bytes)]), len(packet_bytes[i % len(packet_bytes)]))
-               for i in range(max(10_000, args.packets // 4))]
+    packets = [
+        RawPacket(
+            1.0 + i * 1e-6,
+            packet_bytes[i % len(packet_bytes)],
+            len(packet_bytes[i % len(packet_bytes)]),
+            len(packet_bytes[i % len(packet_bytes)]),
+        )
+        for i in range(max(10_000, args.packets // 4))
+    ]
     for raw in packets:
         processor2.process(raw)
     rss_after = _rss_bytes()
     rss_delta = (rss_after - rss_before) if (rss_before and rss_after) else None
-    results["memory"] = {"rss_before": rss_before, "rss_after": rss_after, "rss_delta": rss_delta,
-                         "packets": len(packets)}
+    results["memory"] = {
+        "rss_before": rss_before,
+        "rss_after": rss_after,
+        "rss_delta": rss_delta,
+        "packets": len(packets),
+    }
     if rss_delta is not None:
         print(f"      处理 {len(packets):,} 包，RSS 增量 {_fmt_bytes(rss_delta)}")
     else:
@@ -341,8 +372,9 @@ def main() -> int:
     for item in detection:
         mark = "命中" if item["detected"] else "未命中"
         print(f"      [{mark}] {item['scenario']}")
-    print(f"      正常流量误报：{fp['false_alerts']} / {fp['packets']} 包 "
-          f"（FPR {fp['false_positive_rate'] * 100:.3f}%）")
+    print(
+        f"      正常流量误报：{fp['false_alerts']} / {fp['packets']} 包 （FPR {fp['false_positive_rate'] * 100:.3f}%）"
+    )
 
     if args.json:
         Path(args.json).write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -350,12 +382,16 @@ def main() -> int:
 
     if args.markdown:
         print("\n<!-- benchmark 结果 -->")
-        print(f"| 项目 | 结果 |")
-        print(f"|---|---|")
-        print(f"| 协议解析吞吐 | {parse_result['packets_per_second']:,.0f} 包/秒（{_fmt_bytes(parse_result['bytes_per_second'])}/s） |")
+        print("| 项目 | 结果 |")
+        print("|---|---|")
+        parse_rate = f"{parse_result['packets_per_second']:,.0f} 包/秒"
+        parse_bytes = _fmt_bytes(parse_result["bytes_per_second"])
+        print(f"| 协议解析吞吐 | {parse_rate}（{parse_bytes}/s） |")
         print(f"| 端到端流水线 | {pipeline_result['packets_per_second']:,.0f} 包/秒 |")
         print(f"| 单包解析耗时 | {parse_result['us_per_packet']:.2f} µs |")
-        print(f"| 规则匹配（{rule_count} 条） | 中位 {match_result['median_us']:.2f} µs，P99 {match_result['p99_us']:.2f} µs |")
+        match_median = match_result["median_us"]
+        match_p99 = match_result["p99_us"]
+        print(f"| 规则匹配（{rule_count} 条） | 中位 {match_median:.2f} µs，P99 {match_p99:.2f} µs |")
         if rss_delta is not None:
             print(f"| 内存增量（{len(packets):,} 包） | {_fmt_bytes(rss_delta)} |")
         hits = sum(1 for d in detection if d["detected"])

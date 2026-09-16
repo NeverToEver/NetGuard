@@ -4,12 +4,15 @@ import logging
 import queue
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
-from netguard.capture.pcap import PcapBackend, RawPacket
+from netguard.capture.pcap import CaptureDevice, PcapBackend, RawPacket
 from netguard.capture.source import CaptureSource
 from netguard.processing import PacketEvent, PacketProcessor
+from netguard.rules.engine import RuleEngine
+from netguard.session.tracker import SessionTracker
+from netguard.statistics.traffic_stats import TrafficStats
 
 logger = logging.getLogger(__name__)
 
@@ -65,15 +68,15 @@ class PacketPipeline:
         return self.source.raw_queue
 
     @property
-    def rules(self):
+    def rules(self) -> RuleEngine:
         return self.processor.rules
 
     @property
-    def sessions(self):
+    def sessions(self) -> SessionTracker:
         return self.processor.sessions
 
     @property
-    def stats(self):
+    def stats(self) -> TrafficStats:
         return self.processor.stats
 
     @property
@@ -114,7 +117,7 @@ class PacketPipeline:
     def load_rules(self, rule_text: str) -> int:
         return self.processor.load_rules(rule_text)
 
-    def list_devices(self):
+    def list_devices(self) -> list[CaptureDevice]:
         return self.source.list_devices()
 
     def start(self, device: str, bpf_filter: str = "") -> None:
@@ -206,11 +209,7 @@ class PacketPipeline:
         last_progress: tuple[int, int, int] | None = None
         while True:
             collected.extend(self.pump(1000))
-            if (
-                self.replay_finished
-                and self.source.raw_queue.empty()
-                and self.event_queue.empty()
-            ):
+            if self.replay_finished and self.source.raw_queue.empty() and self.event_queue.empty():
                 break
             if self.source.capture_error:
                 break

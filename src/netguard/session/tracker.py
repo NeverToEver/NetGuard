@@ -3,10 +3,10 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
-logger = logging.getLogger(__name__)
-
 from netguard.clock import Clock, system_clock
 from netguard.parser.packet import PacketInfo
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -137,10 +137,7 @@ class SessionTracker:
                 session.http_search_floor = max(0, session.http_search_floor - removed)
                 logger.debug("会话流截断：丢弃 %d 字节（session=%s）", removed, session.key)
             self._detect_http_events(session)
-        if (
-            len(session.fragments) >= self.max_fragments
-            or session.fragment_bytes > self.max_fragment_bytes
-        ):
+        if len(session.fragments) >= self.max_fragments or session.fragment_bytes > self.max_fragment_bytes:
             self.sessions.pop(session.key, None)
 
     def _detect_http_events(self, session: Session) -> None:
@@ -159,11 +156,14 @@ class SessionTracker:
                 return
             head = stream[session.http_scan_offset : marker_pos].lstrip(b"\r\n").decode("iso-8859-1", errors="replace")
             first = head.split("\r\n", 1)[0]
-            if first and (first.startswith("HTTP/") or first.split(" ", 1)[0].isalpha()):
-                if not session.http_events or session.http_events[-1] != first:
-                    session.http_events.append(first)
-                    if len(session.http_events) > self.max_http_events:
-                        session.http_events.pop(0)
+            if (
+                first
+                and (first.startswith("HTTP/") or first.split(" ", 1)[0].isalpha())
+                and (not session.http_events or session.http_events[-1] != first)
+            ):
+                session.http_events.append(first)
+                if len(session.http_events) > self.max_http_events:
+                    session.http_events.pop(0)
             session.http_scan_offset = marker_pos + len(marker)
             session.http_search_floor = session.http_scan_offset
             search_from = session.http_scan_offset

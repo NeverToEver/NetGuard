@@ -13,6 +13,7 @@
 
 除 ``--check`` / ``--setup`` / ``--no-run`` 外，其余参数原样转发给 ``main.py``。
 """
+
 from __future__ import annotations
 
 import os
@@ -119,24 +120,24 @@ def run_check() -> int:
         import netguard  # noqa: F401
 
         checks.append(("包导入", True, "import netguard 成功"))
-    except Exception as exc:  # noqa: BLE001 - 自检需要报告任何导入错误
+    except Exception as exc:
         checks.append(("包导入", False, str(exc)))
 
     try:
         ok, detail = _check_capture()
-    except Exception as exc:  # noqa: BLE001 - 自检需要报告任何后端错误
+    except Exception as exc:
         ok, detail = False, str(exc)
     checks.append(("抓包后端", ok, detail))
 
     try:
         ok, detail = _check_display()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         ok, detail = False, str(exc)
     checks.append(("图形界面", ok, detail))
 
     try:
         ok, detail = _check_rules()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         ok, detail = False, str(exc)
     checks.append(("IDS 规则", ok, detail))
 

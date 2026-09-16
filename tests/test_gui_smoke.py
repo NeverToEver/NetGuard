@@ -3,6 +3,7 @@
 一个进程内反复创建/销毁 Tk 根窗口会让 Tcl 解释器失效，因此这里用模块级
 单例窗口，每个用例只重置状态、不重建窗口。
 """
+
 from __future__ import annotations
 
 import queue
@@ -150,9 +151,15 @@ def test_refilter_batches_without_blocking(app) -> None:
     app.events = [
         PacketEvent(
             PacketInfo(
-                timestamp=float(i), length=60, raw=b"GET / HTTP/1.1\r\n\r\n",
-                protocol="HTTP", src="10.0.0.1", dst="10.0.0.2",
-                src_port=1, dst_port=80, summary="GET",
+                timestamp=float(i),
+                length=60,
+                raw=b"GET / HTTP/1.1\r\n\r\n",
+                protocol="HTTP",
+                src="10.0.0.1",
+                dst="10.0.0.2",
+                src_port=1,
+                dst_port=80,
+                summary="GET",
             ),
             (),
         )
@@ -183,8 +190,9 @@ def test_background_helper_reports_failure(app, monkeypatch) -> None:
     from netguard.gui import main_ui
 
     captured = {}
-    monkeypatch.setattr(main_ui.messagebox, "showerror",
-                        lambda title, message, **kw: captured.update(title=title, message=message))
+    monkeypatch.setattr(
+        main_ui.messagebox, "showerror", lambda title, message, **kw: captured.update(title=title, message=message)
+    )
 
     def boom():
         raise ValueError("nope")

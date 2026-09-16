@@ -30,11 +30,15 @@ def test_detect_system_dark_returns_bool_without_crashing() -> None:
 
 
 def test_detect_system_dark_windows_dark(monkeypatch) -> None:
-    fake_winreg = type("W", (), {
-        "HKEY_CURRENT_USER": 1,
-        "OpenKey": staticmethod(lambda *a, **k: _Ctx()),
-        "QueryValueEx": staticmethod(lambda *a, **k: (0, 4)),
-    })
+    fake_winreg = type(
+        "W",
+        (),
+        {
+            "HKEY_CURRENT_USER": 1,
+            "OpenKey": staticmethod(lambda *a, **k: _Ctx()),
+            "QueryValueEx": staticmethod(lambda *a, **k: (0, 4)),
+        },
+    )
     monkeypatch.setattr(theme.platform, "system", lambda: "Windows")
     monkeypatch.setitem(__import__("sys").modules, "winreg", fake_winreg)
     assert theme.detect_system_dark() is True
@@ -59,7 +63,7 @@ def test_detect_system_dark_swallows_errors(monkeypatch) -> None:
 
 
 class _Ctx:
-    def __enter__(self) -> "_Ctx":
+    def __enter__(self) -> _Ctx:
         return self
 
     def __exit__(self, *args) -> bool:
