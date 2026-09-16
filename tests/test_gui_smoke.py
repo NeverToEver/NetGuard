@@ -321,19 +321,20 @@ def test_rail_separator_has_its_own_grid_column(app) -> None:
 
     回归：那条 1px 竖线曾与内容帧放在同一个单元格里，`sticky="ns"` 让它停在格子
     中间，后创建的内容帧把它整块盖住，分隔线在界面上从未真正出现过。
-    这里断言「没有两个控件共用单元格」——这正是遮挡的成因。
-    不比较 winfo_x()：窗口是 withdraw 的，Linux/Xvfb 上被 grid 管理的子控件
-    会一直报 x=0（Windows 上则是真实坐标），跨平台不可靠。
+    断言全部基于结构与请求尺寸，不读 winfo_x/winfo_width：窗口是 withdraw 的，
+    Linux/Xvfb 上 grid 子控件根本不会被摆放（实测 x=0、width=1），
+    只有 Windows/macOS 会给真实坐标。
     """
     shell = app._rail.master
-    cells = [(child.grid_info().get("row"), child.grid_info().get("column")) for child in shell.grid_slaves()]
+    children = shell.grid_slaves()
+    cells = [(child.grid_info().get("row"), child.grid_info().get("column")) for child in children]
     assert len(cells) == len(set(cells)), f"有控件共用了同一个 grid 单元格（会互相遮挡）：{cells}"
     assert {column for _row, column in cells} == {0, 1, 2}, "操作轨 / 分隔线 / 内容区应当各占一列"
 
-    separator = next(child for child in shell.grid_slaves() if child.grid_info().get("column") == 1)
-    assert separator.winfo_width() <= 2, "第 1 列应当是 1px 的分隔线"
-    content = next(child for child in shell.grid_slaves() if child.grid_info().get("column") == 2)
-    assert content.winfo_width() > separator.winfo_width(), "内容区不该被压成和分隔线一样宽"
+    separator = next(child for child in children if child.grid_info().get("column") == 1)
+    rail = next(child for child in children if child.grid_info().get("column") == 0)
+    assert rail.winfo_reqwidth() > separator.winfo_reqwidth(), "第 0 列应是操作轨，第 1 列是 1px 分隔线"
+    assert separator.winfo_reqwidth() == 1
 
 
 def test_minimum_window_size_keeps_every_control_inside(app) -> None:
@@ -348,7 +349,9 @@ def test_minimum_window_size_keeps_every_control_inside(app) -> None:
     try:
         app.geometry(f"{min_width}x{min_height}")
         _settle(app)
-        assert app.winfo_width() == min_width
+        if app.winfo_width() != min_width:
+            # 没有窗口管理器时（Xvfb）可能不接受尺寸请求，此时量到的位置没有意义
+            pytest.skip(f"平台未按请求调整窗口尺寸（{app.winfo_width()} != {min_width}）")
 
         for name, widget in (
             ("第 5 张 KPI 卡（IDS 告警）", app._stat_cards["alerts"]),
@@ -381,6 +384,9 @@ def test_shrinking_window_keeps_inspector_usable(app) -> None:
 
         span = app._main_panes.winfo_width()
         sash = app._main_panes.sashpos(0)
+        if span <= 1:
+            # 同上：Xvfb 下 grid 子控件不会被摆放，像素断言在这里无意义
+            pytest.skip("该平台在 withdraw 状态下不计算窗格几何，跳过像素断言")
         tail_min = max(340, app._tail_pane_min(app._main_panes, horizontal=True))
         assert sash <= span - tail_min, f"分隔条未随窗口回收：sash={sash} span={span}"
         columns = int(app.detail.column("#0", "width")) + int(app.detail.column("value", "width"))
