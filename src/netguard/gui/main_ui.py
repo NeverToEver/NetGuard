@@ -17,6 +17,7 @@ from importlib import resources
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, TypeVar, cast
 
+from netguard._version import __version__
 from netguard.capture.interface_mapping import (
     DeviceDisplay,
     build_device_displays,
@@ -38,23 +39,37 @@ from netguard.discovery import (
 )
 from netguard.gui.config import AppConfig, resolve_theme_mode
 from netguard.gui.theme import (
+    PROTOCOL_COLOR_KEYS,
     ThemeManager,
     apply_menu,
     build_colors,
     detect_system_dark,
-    severity_color,
-    status_color,
+    protocol_color,
+    severity_key,
 )
-from netguard.gui.view_models import _format_packet, _search_text
-from netguard.gui.widgets import Tooltip
-from netguard.parser.packet import PacketInfo, hex_dump
+from netguard.gui.view_models import (
+    MAX_HEX_BYTES,
+    DetailNode,
+    _format_packet,
+    _search_text,
+    alert_detail_text,
+    alert_row,
+    build_detail_tree,
+    format_endpoint,
+    hex_rows,
+    packet_row,
+)
+from netguard.gui.widgets import PanelHeader, StatCard, StatusPill, Tooltip, hline, vline
+from netguard.parser.packet import PacketInfo
 from netguard.pipeline import PacketEvent, PacketPipeline, PipelineStatus
+from netguard.rules.engine import Alert
 from netguard.rules.suggestions import RuleSuggestion, generate_rule_suggestions
 from netguard.trafficgen import TEMPLATES, PacketTemplate, TrafficGenerator
 
 logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
+_W = TypeVar("_W", bound=tk.Widget)
 MAX_TABLE_ROWS = 5000
 MAX_ALERT_ROWS = 1000
 MAX_EVENTS = 50_000
@@ -64,6 +79,32 @@ TABLE_TRIM_CHUNK = 3000
 REFILTER_BATCH = 400
 SYSTEM_THEME_POLL_MS = 5000
 CONFIG_SAVE_DEBOUNCE_MS = 800
+#: 默认窗口尺寸与最小尺寸。最小尺寸必须容得下并排的两个面板的默认列宽之和
+#: （见 _DEFAULT_PACKET_COLUMNS / _DEFAULT_DETAIL_COLUMNS，有测试守住这条预算）。
+_DEFAULT_WINDOW_SIZE = (1600, 940)
+MIN_WINDOW_SIZE = (1280, 760)
+#: 数据包列表默认列宽：(宽度, 是否随窗口伸缩)
+_DEFAULT_PACKET_COLUMNS = {
+    "time": (110, False),
+    "src": (140, True),
+    "dst": (140, True),
+    "proto": (56, False),
+    "len": (52, False),
+    "summary": (202, True),
+}
+#: 检视面板解析树的默认列宽（"字段" 列要放得下空状态提示里的 6 个汉字 + 层级缩进）
+_DEFAULT_DETAIL_COLUMNS = {"#0": 132, "value": 200}
+#: 恢复分隔条位置的最大重试次数（等窗口完成首次布局）
+_SASH_RETRY_LIMIT = 12
+#: 各分隔条两侧的最小窗格尺寸（前导, 尾部）：恢复布局与窗口缩放共用同一套钳制，
+#: 尾部尺寸取该窗格"能正常显示内容"的请求尺寸（检视面板 340、底部标签页 150）。
+_SASH_MIN_SIZES = {"workspace": (160, 150), "main": (380, 340)}
+#: 流量统计页协议进度条的宽度与右侧留白列索引
+_STATS_BAR_WIDTH = 260
+_STATS_BAR_SPACER_COLUMN = 3
+
+#: 主题模式 → 日志文案（_cycle_theme_mode 用）
+_THEME_MODE_LABELS = {"system": "跟随系统", "light": "浅色", "dark": "深色"}
 
 #: 快捷键定义：(菜单标签, 加速键, Tk 事件序列)
 SHORTCUTS: list[tuple[str, str, str]] = [
@@ -81,11 +122,15 @@ SHORTCUTS: list[tuple[str, str, str]] = [
 ]
 
 
-def _sort_key(value: str) -> float:
-    try:
-        return float(value)
-    except ValueError:
-        return 0.0
+def _compact_bytes(value: float) -> str:
+    """把字节数压成 4 个字符左右，避免 KPI 卡里的数字撑破行宽。
+
+    只返回数值与量级前缀，单位由调用方的指标卡单独显示。
+    """
+    for limit, suffix in ((1024**4, "TB"), (1024**3, "GB"), (1024**2, "MB"), (1024, "KB")):
+        if abs(value) >= limit:
+            return f"{value / limit:.1f} {suffix}"
+    return f"{value:.0f}"
 
 
 @dataclass(frozen=True)
@@ -281,8 +326,9 @@ class NetGuardApp(tk.Tk):
         self.theme_mode = tk.StringVar(value=resolve_theme_mode(self._config.theme_mode))
         self.dark_mode = tk.BooleanVar(value=self._resolve_dark())
         self._classic_widgets: list[tk.Widget] = []
+        #: 需要跟随主题换色的原生控件：(控件, {选项: build_colors 的键})
+        self._themed: list[tuple[tk.Widget, dict[str, str]]] = []
         self._menus: list[tk.Menu] = []
-        self._capture_indicator: tk.Label | None = None
         self._status_bar: tk.Label | None = None
         self._busy_label: tk.Widget | None = None
         self._log_text: tk.Text | None = None
@@ -290,14 +336,33 @@ class NetGuardApp(tk.Tk):
         self._icon_stack = ExitStack()
         self._icon_image: tk.PhotoImage | None = None
         self._tooltips: list[Tooltip] = []
-        self.packet_total_var = tk.StringVar(value="数据包 0")
-        self.rate_var = tk.StringVar(value="0.0 包/秒")
-        self.bytes_rate_var = tk.StringVar(value="0.0 字节/秒")
-        self.session_var = tk.StringVar(value="会话 0")
-        self.alert_count_var = tk.StringVar(value="告警 0")
-        self.status_text_var = tk.StringVar(value="● 空闲")
+        # --- 新版外壳控件 ---
+        self._pill: StatusPill | None = None
+        self._rail_buttons: dict[str, ttk.Button] = {}
+        self._rail_glyphs: dict[str, str] = {}
+        self._rail_labels: dict[str, str] = {}
+        self._panel_headers: list[PanelHeader] = []
+        self._stat_cards: dict[str, StatCard] = {}
+        self._stats_cells: dict[str, tk.Label] = {}
+        self._proto_bars: dict[str, tuple[tk.Frame, tk.Frame, tk.Label]] = {}
+        self._detail_nodes: dict[str, DetailNode] = {}
+        #: 告警表行 iid → Alert，用于主题切换后重刷严重度配色
+        self._alert_by_row: dict[str, Alert] = {}
+        self._alert_seq = 0
+        self._alert_sort_column = ""
+        self._alert_sort_descending = False
+        self._alert_tab_index = 0
+        self._issue_tab_index = 1
+        self._match_chip: tk.Label | None = None
+        self._log_strip: tk.Frame | None = None
+        self._table_hint: tk.Label | None = None
+        self._status_detail: tk.Label | None = None
+        self._drop_hint: tk.Label | None = None
+        self._error_badge: tk.Label | None = None
+        self._rule_count_label: tk.Label | None = None
+        self._log_expand_btn: ttk.Button | None = None
+        self.status_text_var = tk.StringVar(value="空闲")
         self.busy_text_var = tk.StringVar(value="")
-        self._last_stats_text = ""
         self._last_error_state: tuple[int, int, int, str] | None = None
         self._filter_after_id: str | None = None
         self._refilter_after_id: str | None = None
@@ -312,11 +377,7 @@ class NetGuardApp(tk.Tk):
         self._background_queue: queue.Queue[tuple[str, str | None, str | None, Callable[[], None] | None]] = (
             queue.Queue()
         )
-        self.packet_count_var = tk.StringVar(value="已显示 0 条")
-        self.alert_packet_indices: list[int] = []
-        self._error_packet_indices: list[int] = []
         self._last_error_refresh = 0.0
-        self.alerts_placeholder = False
         self._theme = ThemeManager(self)
         with suppress(tk.TclError):
             self._theme.theme_use("clam")
@@ -348,10 +409,10 @@ class NetGuardApp(tk.Tk):
             try:
                 self.geometry(geometry)
             except tk.TclError:
-                _set_initial_window_size(self, 1600, 940, 1180, 720)
+                _set_initial_window_size(self, *_DEFAULT_WINDOW_SIZE, *MIN_WINDOW_SIZE)
         else:
-            _set_initial_window_size(self, 1600, 940, 1180, 720)
-        self.minsize(1180, 720)
+            _set_initial_window_size(self, *_DEFAULT_WINDOW_SIZE, *MIN_WINDOW_SIZE)
+        self.minsize(*MIN_WINDOW_SIZE)
         if self._config.window.zoomed:
             try:
                 self.state("zoomed")
@@ -360,7 +421,11 @@ class NetGuardApp(tk.Tk):
                     self.attributes("-zoomed", True)
 
     def _clamped_geometry(self, geometry: str) -> str:
-        """恢复窗口位置时按当前屏幕钳制，外接显示器拔掉后窗口不至于整个在屏外。"""
+        """恢复窗口几何时按当前屏幕钳制。
+
+        位置和尺寸都要钳：早期版本只夹位置，把 2560 宽的显示器上存下来的
+        geometry 搬到 2048 宽的屏幕上时，窗口右半边（含操作按钮）会直接落到屏幕外。
+        """
         geometry = geometry.strip()
         if not geometry:
             return ""
@@ -368,11 +433,15 @@ class NetGuardApp(tk.Tk):
         if not match:
             return geometry
         width, height, x_text, y_text = match.groups()
-        x, y = int(x_text), int(y_text)
         screen_w = self.winfo_screenwidth()
         screen_h = self.winfo_screenheight()
-        max_x = max(0, screen_w - (int(width) if width else 0) - 40)
-        max_y = max(0, screen_h - (int(height) if height else 0) - 80)
+        x, y = int(x_text), int(y_text)
+        if width and height:
+            # 留出任务栏与窗口装饰的余量，避免贴边或超出可用工作区
+            width = str(min(int(width), int(screen_w * 0.98)))
+            height = str(min(int(height), int(screen_h * 0.94)))
+        max_x = max(0, screen_w - (int(width) if width else 0))
+        max_y = max(0, screen_h - (int(height) if height else 0) - 40)
         x = min(max(0, x), max_x)
         y = min(max(0, y), max_y)
         size = f"{width}x{height}" if width else ""
@@ -391,26 +460,73 @@ class NetGuardApp(tk.Tk):
     def _apply_theme(self) -> None:
         dark = self._resolve_dark()
         self.dark_mode.set(dark)
-        self._theme.apply(dark, self.table, self._classic_widgets)
         colors = build_colors(dark)
-        if self._capture_indicator:
-            self._capture_indicator.configure(bg=colors["toolbar"])
+        self._theme.apply(
+            dark,
+            self.table,
+            self._classic_widgets,
+            alert_table=self.alerts,
+            detail_tree=self.detail,
+            issue_table=self.error_list,
+        )
+        for widget, options in self._themed:
+            try:
+                if not widget.winfo_exists():
+                    continue
+                widget.configure(**{option: colors[key] for option, key in options.items()})
+            except (tk.TclError, KeyError):
+                continue
         for menu in self._menus:
             apply_menu(menu, colors)
+        for header in self._panel_headers:
+            header.apply_colors(colors)
+        for card in self._stat_cards.values():
+            card.apply_colors(colors)
+        self._register_hex_tags()
+        self._restyle_rail()
         self._refresh_alert_colors()
+        self._refresh_detail_colors()
         self._update_indicator()
         self.event_generate("<<ThemeChanged>>", when="tail")
         self._schedule_config_save()
 
-    def _refresh_alert_colors(self) -> None:
-        """主题切换后重刷既有告警行前景色（per-item 颜色只在插入时设置过）。"""
-        if self.alerts_placeholder:
+    def _restyle_rail(self) -> None:
+        """操作轨按钮的样式随状态变化（暂停时高亮、无数据时禁用），换肤后要重算。"""
+        self._sync_rail_styles()
+
+    def _refresh_detail_colors(self) -> None:
+        """解析树的 tag 前景色由主题决定，但已插入的行需要重新打 tag 才生效。"""
+        nodes = self._detail_nodes
+        if not nodes:
             return
-        for index in range(self.alerts.size()):
+        rows = self.detail.get_children()
+        self._retag_detail_rows(rows, nodes, self.detail)
+
+    def _retag_detail_rows(self, rows: tuple[str, ...], nodes: dict[str, DetailNode], tree: ttk.Treeview) -> None:
+        for iid in rows:
+            node = nodes.get(iid)
+            if node is None:
+                continue
+            with suppress(tk.TclError):
+                tree.item(iid, tags=(node.kind,))
+            self._retag_detail_rows(tree.get_children(iid), nodes, tree)
+
+    def _cycle_theme_mode(self) -> None:
+        """顶栏按钮：在跟随系统 → 浅色 → 深色之间循环。"""
+        order = ("system", "light", "dark")
+        current = self.theme_mode.get()
+        index = order.index(current) if current in order else 0
+        self._set_theme_mode(order[(index + 1) % len(order)])
+        self._log(f"主题已切换为{_THEME_MODE_LABELS[self.theme_mode.get()]}")
+
+    def _refresh_alert_colors(self) -> None:
+        """主题切换后重刷既有告警行前景色（per-row 颜色只在插入时设置过）。"""
+        for iid in self.alerts.get_children():
+            alert = self._alert_by_row.get(iid)
+            if alert is None:
+                continue
             try:
-                # 必须用单参数 get：Listbox.get(first, last) 返回元组，会把
-                # 元组喂给 _alert_color 触发 AttributeError
-                self.alerts.itemconfigure(index, fg=self._alert_color(self.alerts.get(index)))
+                self.alerts.item(iid, tags=(severity_key(alert),))
             except tk.TclError:
                 return
 
@@ -419,14 +535,6 @@ class NetGuardApp(tk.Tk):
         self._apply_theme()
         if mode == "system":
             self._start_system_theme_poll()
-
-    def _toggle_night_mode(self) -> None:
-        """工具栏「夜间模式」开关：把勾选状态固化为 light/dark。
-
-        不能直接绑 _apply_theme —— 它按 theme_mode 重新推导暗色并覆盖 dark_mode，
-        复选框状态会被立刻还原，开关看起来失效。这里显式写入 theme_mode 才会生效。
-        """
-        self._set_theme_mode("dark" if self.dark_mode.get() else "light")
 
     def _start_system_theme_poll(self) -> None:
         """启动系统主题轮询；用哨兵防止重复启动叠加多条轮询链。"""
@@ -466,7 +574,6 @@ class NetGuardApp(tk.Tk):
         for name, pane in (
             ("workspace", getattr(self, "_workspace", None)),
             ("main", getattr(self, "_main_panes", None)),
-            ("bottom", getattr(self, "_bottom_panes", None)),
         ):
             if pane is None:
                 continue
@@ -496,152 +603,277 @@ class NetGuardApp(tk.Tk):
         self._config.theme_mode = self.theme_mode.get()
         self._config.save()
 
+    # --- 界面搭建 ---------------------------------------------------------
+
+    def _paint(self, widget: _W, **options: str) -> _W:
+        """登记原生控件的配色选项，让它在主题切换时自动换色。
+
+        原生 tk 控件不参与 ttk 样式表，逐个在 ``_apply_theme`` 里 configure 会
+        散落到几十处；这里把「控件 + 选项 → 颜色令牌名」集中登记，主题切换时统一重刷。
+
+        返回原控件（保留具体类型），方便直接链式 ``.pack()`` / ``.grid()``。
+        """
+        self._themed.append((widget, options))
+        return widget
+
+    def _new_panel(self, parent: tk.Misc, title: str, *, accent_key: str = "accent") -> tuple[tk.Frame, tk.Frame]:
+        """建一个卡片式面板（1px 边框 + 表面底色 + 标题栏），返回 (面板, 内容区)。"""
+        colors = build_colors(self.dark_mode.get())
+        panel = tk.Frame(parent, highlightthickness=1, borderwidth=0)
+        self._paint(panel, background="surface", highlightbackground="border", highlightcolor="border")
+        header = PanelHeader(panel, title, accent_key=accent_key, font_heading=self._theme.font_heading)
+        header.pack(fill=tk.X)
+        self._panel_headers.append(header)
+        self._paint(hline(panel, colors["border"]), background="border").pack(fill=tk.X)
+        body = tk.Frame(panel, borderwidth=0, highlightthickness=0)
+        self._paint(body, background="surface")
+        body.pack(fill=tk.BOTH, expand=True)
+        return panel, body
+
     def _build(self) -> None:
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(2, weight=1)
-        toolbar = ttk.Frame(self, padding=(10, 6), style="Toolbar.TFrame")
-        toolbar.grid(row=0, column=0, sticky=tk.EW)
-        toolbar.columnconfigure(1, weight=1)
-        toolbar.rowconfigure(2, weight=1)
+        self.rowconfigure(1, weight=1)
+        self._build_title_bar()
+        self._build_shell()
+        self._build_log_strip()
+        self._build_status_bar()
+        self._build_table_menu()
+        self._build_tooltips()
+        self._set_initial_empty_state()
+        self.after(50, self._apply_sash_positions)
 
-        ttk.Label(toolbar, text="NetGuard 抓包", style="AppTitle.TLabel").grid(
-            row=0, column=0, sticky=tk.W, padx=(0, 14)
+    def _build_title_bar(self) -> None:
+        """顶栏：品牌标识 + 抓包状态胶囊 + 主题切换 + 后台任务提示。"""
+        bar = tk.Frame(self, height=40, borderwidth=0, highlightthickness=0)
+        self._paint(bar, background="surface_2")
+        bar.grid(row=0, column=0, sticky=tk.EW)
+        bar.pack_propagate(False)
+
+        mark = tk.Label(bar, text="N", width=2, font=self._theme.font_heading)
+        self._paint(mark, background="accent", foreground="on_accent")
+        mark.pack(side=tk.LEFT, padx=(12, 8))
+        self._paint(
+            tk.Label(bar, text="NetGuard", font=self._theme.font_title),
+            background="surface_2",
+            foreground="text",
+        ).pack(side=tk.LEFT)
+        self._paint(
+            tk.Label(bar, text=f"v{__version__}", font=self._theme.font_tiny),
+            background="surface_2",
+            foreground="text_faint",
+        ).pack(side=tk.LEFT, padx=(6, 0))
+        self._paint(vline(bar, build_colors(self.dark_mode.get())["border_strong"]), background="border_strong").pack(
+            side=tk.LEFT, fill=tk.Y, padx=(12, 10), pady=11
         )
-        capture_controls = ttk.Frame(toolbar, style="Toolbar.TFrame")
-        capture_controls.grid(row=0, column=1, sticky=tk.EW)
-        capture_controls.columnconfigure(1, weight=2)
-        capture_controls.columnconfigure(3, weight=3)
 
-        ttk.Label(capture_controls, text="网卡", style="Muted.TLabel").grid(row=0, column=0, sticky=tk.W, padx=(0, 6))
+        self._pill = StatusPill(bar, font=self._theme.font_small)
+        self._pill.pack(side=tk.LEFT)
+
+        self._busy_label = self._paint(
+            tk.Label(bar, textvariable=self.busy_text_var, font=self._theme.font_small),
+            background="surface_2",
+            foreground="text_dim",
+        )
+        self._busy_label.pack(side=tk.RIGHT, padx=(0, 12))
+        self._theme_btn = ttk.Button(bar, text="◐ 主题", width=8, style="Ghost.TButton", command=self._cycle_theme_mode)
+        self._theme_btn.pack(side=tk.RIGHT, padx=(0, 6))
+
+    def _build_shell(self) -> None:
+        shell = tk.Frame(self, borderwidth=0, highlightthickness=0)
+        self._paint(shell, background="canvas")
+        shell.grid(row=1, column=0, sticky=tk.NSEW)
+        # 第 0 列是操作轨、第 1 列是 1px 分隔线（_build_rail 负责）、第 2 列是内容区
+        shell.columnconfigure(2, weight=1)
+        shell.rowconfigure(0, weight=1)
+
+        self._build_rail(shell)
+
+        content = tk.Frame(shell, borderwidth=0, highlightthickness=0)
+        self._paint(content, background="canvas")
+        content.grid(row=0, column=2, sticky=tk.NSEW)
+        content.columnconfigure(0, weight=1)
+        content.rowconfigure(3, weight=1)
+        self._build_capture_bar(content)
+        self._build_kpi_strip(content)
+        self._build_filter_bar(content)
+        self._build_workspace(content)
+
+    def _build_rail(self, parent: tk.Misc) -> None:
+        """左侧操作轨：把最高频的动作从工具栏搬到固定的竖向位置。"""
+        colors = build_colors(self.dark_mode.get())
+        rail = tk.Frame(parent, width=62, borderwidth=0, highlightthickness=0)
+        self._rail = rail
+        self._paint(rail, background="surface_2")
+        rail.grid(row=0, column=0, sticky=tk.NS)
+        rail.grid_propagate(False)
+        # 操作轨与内容区之间的 1px 分隔线：必须独占第 1 列，和内容区放在同一格里
+        # 会被后创建的内容帧整块盖住（sticky=NS 只纵向拉伸，横向停在单元格中间）
+        self._paint(vline(parent, colors["border"]), background="border").grid(row=0, column=1, sticky=tk.NS)
+
+        spec: list[tuple[str, str, str, str, str, Callable[[], None]] | None] = [
+            ("start", "▶", "开始", "开始抓包（F5）", "RailAccent.TButton", self._start),
+            ("stop", "■", "停止", "停止抓包（Shift+F5）", "RailDanger.TButton", self._stop),
+            ("pause", "‖", "暂停", "暂停/恢复界面刷新（Ctrl+P）", "Rail.TButton", self._toggle_pause),
+            ("clear", "×", "清空", "清空已捕获的数据（Ctrl+L）", "Rail.TButton", self._clear),
+            None,
+            ("open", "▤", "打开", "打开 pcap 文件离线分析（Ctrl+O）", "Rail.TButton", self._open_pcap),
+            ("save", "▣", "保存", "把已捕获的数据包保存为 pcap（Ctrl+S）", "Rail.TButton", self._save_pcap),
+            ("export", "▦", "导出", "导出 IDS 告警（Ctrl+E）", "Rail.TButton", self._export_alerts),
+            None,
+            ("gen", "⇄", "发包", "打开测试发包工具", "Rail.TButton", self._open_traffic_gen),
+            ("scan", "◎", "扫描", "打开网段扫描", "Rail.TButton", self._open_subnet_scan),
+            ("rules", "≡", "规则", "根据已捕获流量自动生成 IDS 规则", "Rail.TButton", self._show_rule_suggestions),
+        ]
+        for entry in spec:
+            if entry is None:
+                self._paint(hline(rail, colors["border"]), background="border").pack(fill=tk.X, padx=13, pady=5)
+                continue
+            key, glyph, label, hint, style, command = entry
+            button = ttk.Button(rail, text=self._rail_text(glyph, label), style=style, width=5, command=command)
+            button.pack(padx=5, pady=1)
+            self._rail_buttons[key] = button
+            self._rail_glyphs[key] = glyph
+            self._rail_labels[key] = label
+            self._tooltips.append(
+                Tooltip(button, hint, dark=self.dark_mode.get(), dark_provider=lambda: self.dark_mode.get())
+            )
+
+    @staticmethod
+    def _rail_text(glyph: str, label: str) -> str:
+        return f"{glyph}\n{label}"
+
+    def _set_rail_text(self, key: str, label: str) -> None:
+        """更新操作轨按钮的文字，图标保持不变。"""
+        button = self._rail_buttons.get(key)
+        if button is None:
+            return
+        glyph = self._rail_glyphs.get(key, "")
+        self._rail_labels[key] = label
+        with suppress(tk.TclError):
+            button.configure(text=self._rail_text(glyph, label))
+
+    def _build_capture_bar(self, parent: tk.Misc) -> None:
+        colors = build_colors(self.dark_mode.get())
+        bar = tk.Frame(parent, padx=12, pady=9, borderwidth=0, highlightthickness=0)
+        self._paint(bar, background="surface")
+        bar.grid(row=0, column=0, sticky=tk.EW)
+        self._paint(hline(bar, colors["border"]), background="border").pack(side=tk.BOTTOM, fill=tk.X)
+
+        self._paint(
+            tk.Label(bar, text="网卡", font=self._theme.font_small), background="surface", foreground="text_dim"
+        ).pack(side=tk.LEFT, padx=(0, 7))
         self.device_var = tk.StringVar()
-        self.device_box = ttk.Combobox(capture_controls, textvariable=self.device_var, width=28, state="readonly")
-        self.device_box.grid(row=0, column=1, sticky=tk.EW, padx=(0, 10))
+        self.device_box = ttk.Combobox(bar, textvariable=self.device_var, width=30, state="readonly")
+        self.device_box.pack(side=tk.LEFT)
         self.device_box.bind("<<ComboboxSelected>>", lambda _: self._on_device_selected())
-        ttk.Label(capture_controls, text="抓包过滤(BPF)", style="Muted.TLabel").grid(
-            row=0, column=2, sticky=tk.W, padx=(0, 6)
-        )
+
+        self._paint(
+            tk.Label(bar, text="捕获过滤 BPF", font=self._theme.font_small),
+            background="surface",
+            foreground="text_dim",
+        ).pack(side=tk.LEFT, padx=(14, 7))
         # 空 BPF 表示抓全部流量，不要用 or 回退默认值
         self.bpf_var = tk.StringVar(value=self._config.window.bpf)
-        bpf_entry = ttk.Entry(capture_controls, textvariable=self.bpf_var, style="Filter.TEntry")
+        bpf_entry = ttk.Entry(bar, textvariable=self.bpf_var, style="Filter.TEntry", width=24)
         self.bpf_var_entry = bpf_entry
-        bpf_entry.grid(row=0, column=3, sticky=tk.EW, padx=(0, 6))
+        bpf_entry.pack(side=tk.LEFT)
         bpf_entry.bind("<Return>", lambda _: self._apply_bpf_entry())
-        ttk.Button(
-            capture_controls, text="应用BPF", width=7, style="Accent.TButton", command=self._apply_bpf_entry
-        ).grid(row=0, column=4, sticky=tk.EW, padx=(0, 6))
-        ttk.Button(
-            capture_controls, text="BPF 模板", width=8, style="Secondary.TButton", command=self._show_bpf_templates
-        ).grid(row=0, column=5, sticky=tk.EW)
+        ttk.Button(bar, text="应用", width=6, style="Accent.TButton", command=self._apply_bpf_entry).pack(
+            side=tk.LEFT, padx=(7, 0)
+        )
+        ttk.Button(bar, text="模板", width=6, style="Ghost.TButton", command=self._show_bpf_templates).pack(
+            side=tk.LEFT, padx=(6, 0)
+        )
 
-        self.status_var = tk.StringVar(value="正在加载网卡...")
-        status_frame = ttk.Frame(toolbar, style="Toolbar.TFrame")
-        status_frame.grid(row=2, column=0, columnspan=2, sticky=tk.EW, pady=(6, 0))
-        status_frame.columnconfigure(1, weight=1)
-        initial_colors = build_colors(self.dark_mode.get())
-        self._capture_indicator = tk.Label(
-            status_frame,
-            text="●",
-            font=self._theme.font_small,
-            fg=status_color(initial_colors, "idle"),
-            bg=initial_colors["toolbar"],
-            borderwidth=0,
-            highlightthickness=0,
+        self._drop_hint = self._paint(
+            tk.Label(bar, text="丢弃 0 · 解析异常 0", font=self._theme.font_small),
+            background="surface",
+            foreground="text_faint",
         )
-        self._capture_indicator.grid(row=0, column=0, sticky=tk.W, padx=(0, 4))
-        self._log_text = tk.Text(status_frame, height=2, wrap=tk.WORD, state=tk.DISABLED)
-        self._log_text.grid(row=0, column=1, sticky=tk.EW)
-        self._classic_widgets.append(self._log_text)
-        self._log_expand_btn = ttk.Button(
-            status_frame, text="展开", width=4, style="Secondary.TButton", command=self._toggle_log
-        )
-        self._log_expand_btn.grid(row=0, column=2, sticky=tk.E, padx=(4, 10))
+        self._drop_hint.pack(side=tk.RIGHT)
 
-        actions = ttk.Frame(toolbar, style="Toolbar.TFrame")
-        actions.grid(row=1, column=0, columnspan=2, sticky=tk.EW, pady=(6, 0))
-        actions.columnconfigure(0, weight=1)
-        for column in range(1, 6):
-            actions.columnconfigure(column, minsize=88)
-        self.start_btn = ttk.Button(actions, text="开始", width=8, style="Accent.TButton", command=self._start)
-        self.start_btn.grid(row=0, column=1, sticky=tk.EW, padx=(0, 6))
-        self.stop_btn = ttk.Button(actions, text="停止", width=8, style="Danger.TButton", command=self._stop)
-        self.stop_btn.grid(row=0, column=2, sticky=tk.EW, padx=(0, 6))
-        self.pause_btn = ttk.Button(
-            actions, text="暂停", width=8, style="Secondary.TButton", command=self._toggle_pause
-        )
-        self.pause_btn.grid(row=0, column=3, sticky=tk.EW, padx=(0, 6))
-        ttk.Button(actions, text="清空", width=8, style="Secondary.TButton", command=self._clear).grid(
-            row=0, column=4, sticky=tk.EW
-        )
-        ttk.Button(actions, text="测试发包", width=10, style="Secondary.TButton", command=self._open_traffic_gen).grid(
-            row=1, column=1, sticky=tk.EW, padx=(0, 6), pady=(6, 0)
-        )
-        ttk.Button(actions, text="网段扫描", width=10, style="Secondary.TButton", command=self._open_subnet_scan).grid(
-            row=1, column=2, sticky=tk.EW, padx=(0, 6), pady=(6, 0)
-        )
-        self.export_alerts_btn = ttk.Button(
-            actions, text="导出告警", width=10, style="Secondary.TButton", command=self._export_alerts
-        )
-        self.export_alerts_btn.grid(row=1, column=3, sticky=tk.EW, padx=(0, 6), pady=(6, 0))
-        ttk.Checkbutton(
-            actions,
-            text="夜间模式",
-            variable=self.dark_mode,
-            style="Switch.TCheckbutton",
-            command=self._toggle_night_mode,
-        ).grid(row=1, column=4, sticky=tk.W, padx=(0, 6), pady=(6, 0))
-        ttk.Button(actions, text="退出", width=8, style="Danger.TButton", command=self._exit).grid(
-            row=1, column=5, sticky=tk.EW, pady=(6, 0)
-        )
-        ttk.Button(actions, text="打开 pcap", width=10, style="Secondary.TButton", command=self._open_pcap).grid(
-            row=2, column=1, sticky=tk.EW, padx=(0, 6), pady=(6, 0)
-        )
-        self.save_pcap_btn = ttk.Button(
-            actions, text="保存 pcap", width=10, style="Secondary.TButton", command=self._save_pcap
-        )
-        self.save_pcap_btn.grid(row=2, column=2, sticky=tk.EW, padx=(0, 6), pady=(6, 0))
+    #: KPI 卡定义：(键, 标题, 单位, 是否告警色)
+    _KPI_SPEC = (
+        ("packets", "数据包总数", "", False),
+        ("rate", "包速率", "包/秒", False),
+        ("bytes_rate", "吞吐量", "字节/秒", False),
+        ("sessions", "活动会话", "", False),
+        ("alerts", "IDS 告警", "", True),
+    )
 
-        filters = ttk.Frame(self, padding=(10, 5), style="FilterBar.TFrame")
-        filters.grid(row=1, column=0, sticky=tk.EW)
-        filters.columnconfigure(1, weight=1)
-        ttk.Label(filters, text="显示过滤", style="FilterLabel.TLabel").grid(row=0, column=0, sticky=tk.W, padx=(0, 8))
+    def _build_kpi_strip(self, parent: tk.Misc) -> None:
+        """KPI 指标条：用 1px 间隙分隔的等宽指标卡，替代原来挤在一行的小字。"""
+        colors = build_colors(self.dark_mode.get())
+        strip = tk.Frame(parent, borderwidth=0, highlightthickness=0)
+        self._paint(strip, background="border")
+        strip.grid(row=1, column=0, sticky=tk.EW)
+        for index, (key, label, unit, alarm) in enumerate(self._KPI_SPEC):
+            card = StatCard(
+                strip,
+                label=label,
+                value="0",
+                unit=unit,
+                alarm=alarm,
+                font_metric=self._theme.font_metric,
+                font_small=self._theme.font_small,
+                colors=colors,
+            )
+            # 卡片之间靠 1px 的容器底色露出分隔线
+            card.grid(row=0, column=index, sticky=tk.NSEW, padx=(0 if index == 0 else 1, 0))
+            strip.columnconfigure(index, weight=1)
+            self._stat_cards[key] = card
+        self._paint(hline(strip, colors["border"]), background="border").grid(
+            row=1, column=0, columnspan=len(self._KPI_SPEC), sticky=tk.EW
+        )
+
+    def _build_filter_bar(self, parent: tk.Misc) -> None:
+        colors = build_colors(self.dark_mode.get())
+        bar = tk.Frame(parent, padx=12, pady=8, borderwidth=0, highlightthickness=0)
+        self._paint(bar, background="surface_2")
+        bar.grid(row=2, column=0, sticky=tk.EW)
+        self._paint(hline(bar, colors["border"]), background="border").pack(side=tk.BOTTOM, fill=tk.X)
+
+        self._paint(
+            tk.Label(bar, text="显示过滤", font=self._theme.font_small), background="surface_2", foreground="text_dim"
+        ).pack(side=tk.LEFT, padx=(0, 8))
         self.display_filter = tk.StringVar(value=self._config.window.display_filter)
-        entry = ttk.Entry(filters, textvariable=self.display_filter, style="Filter.TEntry")
+        entry = ttk.Entry(bar, textvariable=self.display_filter, style="Filter.TEntry")
         self.display_filter_entry = entry
-        entry.grid(row=0, column=1, sticky=tk.EW, padx=(0, 8))
+        entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
         entry.bind("<KeyRelease>", lambda _: self._debounced_refilter())
-        ttk.Button(
-            filters, text="过滤模板", width=8, style="Secondary.TButton", command=self._show_display_filter_templates
-        ).grid(row=0, column=2, sticky=tk.EW, padx=(0, 6))
-        ttk.Button(filters, text="应用", width=8, style="Secondary.TButton", command=self._refilter).grid(
-            row=0, column=3, sticky=tk.EW
+        ttk.Button(bar, text="模板", width=6, style="Ghost.TButton", command=self._show_display_filter_templates).pack(
+            side=tk.LEFT, padx=(8, 0)
         )
-        metrics = ttk.Frame(filters, style="FilterBar.TFrame")
-        metrics.grid(row=1, column=0, columnspan=4, sticky=tk.W, pady=(5, 0))
-        for column, variable in enumerate(
-            (
-                self.packet_count_var,
-                self.packet_total_var,
-                self.rate_var,
-                self.bytes_rate_var,
-                self.session_var,
-                self.alert_count_var,
-            )
-        ):
-            ttk.Label(metrics, textvariable=variable, style="FilterLabel.TLabel").grid(
-                row=0, column=column, sticky=tk.W, padx=(0, 12)
-            )
+        self._match_chip = self._paint(
+            tk.Label(bar, text="0 / 0 条匹配", font=self._theme.font_small),
+            background="tint_accent",
+            foreground="accent",
+        )
+        self._match_chip.pack(side=tk.LEFT, padx=(10, 0), ipadx=8, ipady=2)
 
-        workspace = ttk.PanedWindow(self, orient=tk.VERTICAL, style="Content.TPanedwindow")
-        workspace.grid(row=2, column=0, sticky=tk.NSEW, padx=8, pady=(0, 8))
+    def _build_workspace(self, parent: tk.Misc) -> None:
+        workspace = ttk.PanedWindow(parent, orient=tk.VERTICAL, style="Content.TPanedwindow")
+        workspace.grid(row=3, column=0, sticky=tk.NSEW, padx=10, pady=10)
         main_area = ttk.PanedWindow(workspace, orient=tk.HORIZONTAL, style="Content.TPanedwindow")
-        bottom_area = ttk.PanedWindow(workspace, orient=tk.HORIZONTAL, style="Content.TPanedwindow")
+        bottom = ttk.Frame(workspace, style="Surface.TFrame")
         workspace.add(main_area, weight=5)
-        workspace.add(bottom_area, weight=3)
+        workspace.add(bottom, weight=3)
+        self._workspace = workspace
+        self._main_panes = main_area
+        # 窗格自身尺寸变化时就重算分隔条：窗口缩放、兄弟控件请求尺寸变化都会
+        # 让窗格变窄，若只在窗口 Configure 时重算，尾部窗格仍会被压扁
+        for name, pane in (("workspace", workspace), ("main", main_area)):
+            pane.bind("<Configure>", partial(self._on_pane_configure, name), add="+")
 
-        packet_frame = ttk.LabelFrame(main_area, text="数据包列表", padding=5)
-        details = ttk.PanedWindow(main_area, orient=tk.VERTICAL, style="Content.TPanedwindow")
-        main_area.add(packet_frame, weight=3)
-        main_area.add(details, weight=2)
+        self._build_packet_panel(main_area)
+        self._build_inspector_panel(main_area)
+        self._build_bottom_tabs(bottom)
+
+    def _build_packet_panel(self, parent: ttk.PanedWindow) -> None:
+        panel, body = self._new_panel(parent, "数据包列表")
+        parent.add(panel, weight=3)
+        body.rowconfigure(0, weight=1)
+        body.columnconfigure(0, weight=1)
 
         columns = ("time", "src", "dst", "proto", "len", "summary")
         headings = {
@@ -652,118 +884,322 @@ class NetGuardApp(tk.Tk):
             "len": "长度",
             "summary": "摘要",
         }
-        packet_frame.rowconfigure(0, weight=1)
-        packet_frame.columnconfigure(0, weight=1)
-        self.table = ttk.Treeview(packet_frame, columns=columns, show="headings", height=14)
-        for col, width in zip(columns, [100, 170, 170, 72, 68, 440], strict=True):
+        self.table = ttk.Treeview(body, columns=columns, show="headings", height=14)
+        # 列宽预算：时间/协议/长度定宽，地址与摘要按比例伸缩。
+        # 详情面板与数据包列表并排，两组默认列宽之和必须落在最小窗口（MIN_WINDOW_SIZE）
+        # 之内，否则最小尺寸下右侧内容会被推到窗口外（tests/test_gui_layout.py 守住）。
+        for col, (width, stretch) in _DEFAULT_PACKET_COLUMNS.items():
             self.table.heading(col, text=headings[col], command=partial(self._sort, col))
-            self.table.column(col, width=width, anchor=tk.W)
-        self.table.column("len", anchor=tk.E, stretch=False)
-        self.table.column("proto", anchor=tk.CENTER, stretch=False)
-        table_scroll = ttk.Scrollbar(packet_frame, orient=tk.VERTICAL, command=self.table.yview)
-        table_hscroll = ttk.Scrollbar(packet_frame, orient=tk.HORIZONTAL, command=self.table.xview)
+            self.table.column(col, width=width, minwidth=48, anchor=tk.W, stretch=stretch)
+        self.table.column("len", anchor=tk.E)
+        self.table.column("proto", anchor=tk.CENTER)
+        table_scroll = ttk.Scrollbar(body, orient=tk.VERTICAL, command=self.table.yview)
+        table_hscroll = ttk.Scrollbar(body, orient=tk.HORIZONTAL, command=self.table.xview)
         self.table.configure(yscrollcommand=table_scroll.set, xscrollcommand=table_hscroll.set)
         self.table.grid(row=0, column=0, sticky=tk.NSEW)
         table_scroll.grid(row=0, column=1, sticky=tk.NS)
         table_hscroll.grid(row=1, column=0, sticky=tk.EW)
         self.table.bind("<<TreeviewSelect>>", lambda _: self._show_selected())
+        header = self._panel_headers[-1]
+        self._table_hint = self._paint(
+            tk.Label(header.actions, text="", font=self._theme.font_small),
+            background="surface_2",
+            foreground="text_faint",
+        )
+        self._table_hint.pack(side=tk.LEFT)
 
-        detail_frame = ttk.LabelFrame(details, text="数据包详情", padding=5)
-        self.detail = tk.Text(detail_frame, height=7, wrap=tk.NONE)
-        self._classic_widgets.append(self.detail)
-        self.detail.pack(fill=tk.BOTH, expand=True)
-        details.add(detail_frame, weight=3)
+    def _build_inspector_panel(self, parent: ttk.PanedWindow) -> None:
+        """详情面板：解析树与原始字节两个视图，用标签页切换以省下纵向空间。"""
+        panel, body = self._new_panel(parent, "数据包检视")
+        parent.add(panel, weight=2)
+        body.rowconfigure(0, weight=1)
+        body.columnconfigure(0, weight=1)
 
-        hex_frame = ttk.LabelFrame(details, text="数据包原始字节", padding=5)
-        self.hex_view = tk.Text(hex_frame, height=5, wrap=tk.NONE)
+        notebook = ttk.Notebook(body, style="Card.TNotebook")
+        notebook.grid(row=0, column=0, sticky=tk.NSEW)
+
+        tree_frame = ttk.Frame(notebook, style="Surface.TFrame")
+        tree_frame.rowconfigure(0, weight=1)
+        tree_frame.columnconfigure(0, weight=1)
+        self.detail = ttk.Treeview(tree_frame, columns=("value",), show="tree headings", height=8)
+        self.detail.heading("#0", text="字段", anchor=tk.W)
+        self.detail.heading("value", text="值", anchor=tk.W)
+        # 与数据包列表同理：这两列的默认宽度决定了检视面板的最小宽度，
+        # 必须让 MIN_WINDOW_SIZE 放得下（_SASH_MIN_SIZES 的尾部下限取 340）。
+        self.detail.column("#0", width=_DEFAULT_DETAIL_COLUMNS["#0"], minwidth=90, anchor=tk.W, stretch=False)
+        self.detail.column("value", width=_DEFAULT_DETAIL_COLUMNS["value"], minwidth=80, anchor=tk.W, stretch=True)
+        detail_scroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.detail.yview)
+        self.detail.configure(yscrollcommand=detail_scroll.set)
+        self.detail.grid(row=0, column=0, sticky=tk.NSEW)
+        detail_scroll.grid(row=0, column=1, sticky=tk.NS)
+        notebook.add(tree_frame, text="解析树")
+
+        hex_frame = ttk.Frame(notebook, style="Surface.TFrame")
+        hex_frame.rowconfigure(0, weight=1)
+        hex_frame.columnconfigure(0, weight=1)
+        self.hex_view = tk.Text(hex_frame, height=8, width=1, wrap=tk.NONE, padx=8, pady=6)
         self._classic_widgets.append(self.hex_view)
-        self.hex_view.pack(fill=tk.BOTH, expand=True)
-        details.add(hex_frame, weight=2)
+        hex_scroll = ttk.Scrollbar(hex_frame, orient=tk.VERTICAL, command=self.hex_view.yview)
+        hex_hscroll = ttk.Scrollbar(hex_frame, orient=tk.HORIZONTAL, command=self.hex_view.xview)
+        self.hex_view.configure(yscrollcommand=hex_scroll.set, xscrollcommand=hex_hscroll.set)
+        self.hex_view.grid(row=0, column=0, sticky=tk.NSEW)
+        hex_scroll.grid(row=0, column=1, sticky=tk.NS)
+        hex_hscroll.grid(row=1, column=0, sticky=tk.EW)
+        notebook.add(hex_frame, text="原始字节")
+        self._register_hex_tags()
 
-        alert_error_column = ttk.Frame(bottom_area)
-        alert_error_column.columnconfigure(0, weight=1)
-        alert_error_column.rowconfigure(0, weight=1)
-        alert_error_column.rowconfigure(1, weight=1)
+    def _register_hex_tags(self) -> None:
+        """十六进制视图的三段配色；tag 需在 Text 上注册，主题切换时重刷。"""
+        colors = build_colors(self.dark_mode.get())
+        for tag, key in (("offset", "text_faint"), ("bytes", "text"), ("ascii", "text_dim")):
+            self.hex_view.tag_configure(tag, foreground=colors[key])
+        self.hex_view.tag_configure("offset", font=self._theme.font_mono_small)
+        self.hex_view.tag_configure("bytes", font=self._theme.font_mono_small)
 
-        alert_frame = ttk.LabelFrame(alert_error_column, text="告警日志（双击定位数据包）", padding=5)
-        alert_frame.grid(row=0, column=0, sticky=tk.NSEW, pady=(0, 4))
-        alert_inner = ttk.Frame(alert_frame)
-        alert_inner.pack(fill=tk.BOTH, expand=True)
-        self.alerts = tk.Listbox(alert_inner, height=4)
-        self._classic_widgets.append(self.alerts)
-        self.alerts.bind("<Double-Button-1>", lambda _: self._jump_to_alert_packet())
-        alert_scroll = ttk.Scrollbar(alert_inner, orient=tk.VERTICAL, command=self.alerts.yview)
+    def _build_bottom_tabs(self, parent: tk.Misc) -> None:
+        """底部区域：告警 / 解析问题 / 流量统计 / IDS 规则。
+
+        原来这三个区域是并排的窄列，每个都放不下内容；改成标签页后
+        同一块高度只服务一个视图，信息密度反而更低、可读性更高。
+        """
+        parent.rowconfigure(0, weight=1)
+        parent.columnconfigure(0, weight=1)
+        notebook = ttk.Notebook(parent, style="Card.TNotebook")
+        notebook.grid(row=0, column=0, sticky=tk.NSEW)
+        self._bottom_tabs = notebook
+
+        self._build_alert_tab(notebook)
+        self._alert_tab_index = 0
+        self._build_issue_tab(notebook)
+        self._issue_tab_index = 1
+        self._build_stats_tab(notebook)
+        self._build_rules_tab(notebook)
+
+    def _build_alert_tab(self, notebook: ttk.Notebook) -> None:
+        frame = ttk.Frame(notebook, style="Surface.TFrame")
+        frame.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1)
+        columns = ("time", "severity", "source", "msg", "tuple")
+        self.alerts = ttk.Treeview(frame, columns=columns, show="headings", height=6)
+        for col, (title, width, anchor) in zip(
+            columns,
+            (
+                ("时间", 118, tk.W),
+                ("级别", 48, tk.CENTER),
+                ("来源", 104, tk.W),
+                ("告警信息", 520, tk.W),
+                ("五元组", 250, tk.W),
+            ),
+            strict=True,
+        ):
+            self.alerts.heading(col, text=title, command=partial(self._sort_alerts, col))
+            self.alerts.column(col, width=width, anchor=cast("Any", anchor), stretch=col == "msg")
+        self.alerts.column("time", stretch=False)
+        self.alerts.column("severity", stretch=False)
+        self.alerts.column("source", stretch=False)
+        alert_scroll = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=self.alerts.yview)
         self.alerts.configure(yscrollcommand=alert_scroll.set)
-        self.alerts.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        alert_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.alerts.grid(row=0, column=0, sticky=tk.NSEW)
+        alert_scroll.grid(row=0, column=1, sticky=tk.NS)
+        self.alerts.bind("<Double-Button-1>", lambda _: self._jump_to_alert_packet())
+        self.alerts.bind("<Return>", lambda _: self._jump_to_alert_packet())
+        self._paint(
+            tk.Label(frame, text="双击告警可定位到对应数据包", font=self._theme.font_tiny),
+            background="surface",
+            foreground="text_faint",
+        ).grid(row=1, column=0, sticky=tk.W, padx=10, pady=(2, 4))
+        notebook.add(frame, text="告警")
 
-        error_frame = ttk.LabelFrame(alert_error_column, text="解析问题（截断 / 无效字段 / 协议异常）", padding=5)
-        error_frame.grid(row=1, column=0, sticky=tk.NSEW)
-        error_header = ttk.Frame(error_frame)
-        error_header.pack(fill=tk.X, pady=(0, 4))
-        self.error_summary_var = tk.StringVar(value="解析问题 0 | 致命异常 0")
-        ttk.Label(error_header, textvariable=self.error_summary_var, style="FilterLabel.TLabel").pack(side=tk.LEFT)
-        ttk.Label(error_header, text="异常包不会被丢弃，而是标记问题后继续流转", style="Muted.TLabel").pack(
-            side=tk.RIGHT
-        )
-        error_inner = ttk.Frame(error_frame)
-        error_inner.pack(fill=tk.BOTH, expand=True)
-        self.error_list = tk.Listbox(error_inner, height=4)
-        self._classic_widgets.append(self.error_list)
-        self.error_list.bind("<Double-Button-1>", lambda _: self._jump_to_error_packet())
-        error_scroll = ttk.Scrollbar(error_inner, orient=tk.VERTICAL, command=self.error_list.yview)
+    def _build_issue_tab(self, notebook: ttk.Notebook) -> None:
+        frame = ttk.Frame(notebook, style="Surface.TFrame")
+        frame.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1)
+        columns = ("time", "layer", "message", "tuple")
+        self.error_list = ttk.Treeview(frame, columns=columns, show="headings", height=6)
+        for col, (title, width, anchor) in zip(
+            columns,
+            (
+                ("时间", 88, tk.W),
+                ("协议层", 82, tk.W),
+                ("说明", 480, tk.W),
+                ("五元组", 250, tk.W),
+            ),
+            strict=True,
+        ):
+            self.error_list.heading(col, text=title)
+            self.error_list.column(col, width=width, anchor=cast("Any", anchor), stretch=col == "message")
+        error_scroll = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=self.error_list.yview)
         self.error_list.configure(yscrollcommand=error_scroll.set)
-        self.error_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        error_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.error_list.grid(row=0, column=0, sticky=tk.NSEW)
+        error_scroll.grid(row=0, column=1, sticky=tk.NS)
+        self.error_list.bind("<Double-Button-1>", lambda _: self._jump_to_error_packet())
+        self._paint(
+            tk.Label(
+                frame,
+                text="异常包不会被丢弃，而是标记问题后继续流转；双击可定位到对应数据包",
+                font=self._theme.font_tiny,
+            ),
+            background="surface",
+            foreground="text_faint",
+        ).grid(row=1, column=0, sticky=tk.W, padx=10, pady=(2, 4))
+        self.error_summary_var = tk.StringVar(value="解析问题 0 · 致命异常 0")
+        self._paint(
+            tk.Label(frame, textvariable=self.error_summary_var, font=self._theme.font_tiny),
+            background="surface",
+            foreground="danger",
+        ).grid(row=1, column=0, sticky=tk.E, padx=10, pady=(2, 4))
+        notebook.add(frame, text="解析问题")
 
-        bottom_area.add(alert_error_column, weight=2)
+    #: 流量统计页里固定展示的协议与它们的配色键
+    _STATS_PROTOCOLS = ("TCP", "UDP", "HTTP", "DNS", "ICMP", "OTHER")
 
-        stats_frame = ttk.LabelFrame(bottom_area, text="统计信息", padding=5)
-        self.stats_text = tk.Text(stats_frame, height=5)
-        self._classic_widgets.append(self.stats_text)
-        self.stats_text.pack(fill=tk.BOTH, expand=True)
-        bottom_area.add(stats_frame, weight=1)
+    def _build_stats_tab(self, notebook: ttk.Notebook) -> None:
+        frame = ttk.Frame(notebook, style="Surface.TFrame", padding=(12, 10))
+        frame.columnconfigure(0, weight=1)
+        notebook.add(frame, text="流量统计")
 
-        rules_frame = ttk.LabelFrame(bottom_area, text="IDS 规则", padding=5)
-        rules_actions = ttk.Frame(rules_frame)
-        rules_actions.pack(side=tk.RIGHT, fill=tk.Y, padx=(6, 0))
-        self.rules_text = tk.Text(rules_frame, height=5)
+        totals = tk.Frame(frame, borderwidth=0, highlightthickness=0)
+        self._paint(totals, background="surface")
+        totals.grid(row=0, column=0, sticky=tk.EW)
+        totals_spec = (
+            ("total_bytes", "总字节"),
+            ("total_packets", "总数据包"),
+            ("dropped", "队列丢弃"),
+            ("parse_errors", "致命异常"),
+        )
+        for column, (key, title) in enumerate(totals_spec):
+            cell = tk.Frame(totals, borderwidth=0, highlightthickness=0)
+            self._paint(cell, background="surface")
+            cell.grid(row=0, column=column, sticky=tk.W, padx=(0, 34))
+            self._paint(
+                tk.Label(cell, text=title, font=self._theme.font_tiny), background="surface", foreground="text_faint"
+            ).pack(anchor=tk.W)
+            value = self._paint(
+                tk.Label(cell, text="0", font=self._theme.font_mono), background="surface", foreground="text"
+            )
+            value.pack(anchor=tk.W)
+            self._stats_cells[key] = value
+
+        self._paint(
+            tk.Label(frame, text="协议分布", font=self._theme.font_heading), background="surface", foreground="text_dim"
+        ).grid(row=1, column=0, sticky=tk.W, pady=(12, 6))
+
+        bars = tk.Frame(frame, borderwidth=0, highlightthickness=0)
+        self._paint(bars, background="surface")
+        bars.grid(row=2, column=0, sticky=tk.EW)
+        # 名称 / 进度条 / 计数三段左对齐成一簇，多出来的宽度由末尾空白列吸收；
+        # 否则计数会被推到面板最右侧，和它对应的协议名隔了半屏。
+        bars.columnconfigure(_STATS_BAR_SPACER_COLUMN, weight=1)
+        for row, proto in enumerate(self._STATS_PROTOCOLS):
+            self._paint(
+                tk.Label(bars, text=proto, width=6, anchor=tk.W, font=self._theme.font_mono_small),
+                background="surface",
+                foreground=protocol_color(build_colors(self.dark_mode.get()), proto),
+            ).grid(row=row, column=0, sticky=tk.W, pady=1)
+            track = tk.Frame(bars, height=6, width=_STATS_BAR_WIDTH, borderwidth=0, highlightthickness=0)
+            self._paint(track, background="surface_3")
+            track.grid(row=row, column=1, sticky=tk.W)
+            track.grid_propagate(False)
+            fill = tk.Frame(track, height=6, borderwidth=0, highlightthickness=0)
+            self._paint(fill, background=PROTOCOL_COLOR_KEYS.get(proto.lower(), "proto_other"))
+            fill.place(x=0, y=0, relwidth=0.0, relheight=1.0)
+            count = self._paint(
+                tk.Label(bars, text="0", width=8, anchor=tk.W, font=self._theme.font_mono_small),
+                background="surface",
+                foreground="text_dim",
+            )
+            count.grid(row=row, column=2, sticky=tk.W, padx=(10, 0))
+            self._proto_bars[proto] = (track, fill, count)
+
+    def _build_rules_tab(self, notebook: ttk.Notebook) -> None:
+        frame = ttk.Frame(notebook, style="Surface.TFrame")
+        frame.rowconfigure(1, weight=1)
+        frame.columnconfigure(0, weight=1)
+        actions = tk.Frame(frame, borderwidth=0, highlightthickness=0, padx=10, pady=7)
+        self._paint(actions, background="surface")
+        actions.grid(row=0, column=0, sticky=tk.EW)
+        for text, hint, command in (
+            ("加载规则", "把编辑框中的规则编译进 IDS 引擎", self._load_rules),
+            ("规则模板", "从常用模板快速插入规则", self._show_ids_rule_templates),
+            ("自动生成", "根据已捕获流量生成规则建议", self._show_rule_suggestions),
+            ("清空规则", "清空编辑框中的全部规则", self._clear_rules),
+        ):
+            button = ttk.Button(actions, text=text, style="Ghost.TButton", command=command)
+            button.pack(side=tk.LEFT, padx=(0, 6))
+            self._tooltips.append(
+                Tooltip(button, hint, dark=self.dark_mode.get(), dark_provider=lambda: self.dark_mode.get())
+            )
+        self._rule_count_label = self._paint(
+            tk.Label(actions, text="已加载 0 条规则", font=self._theme.font_small),
+            background="surface",
+            foreground="text_faint",
+        )
+        self._rule_count_label.pack(side=tk.RIGHT)
+
+        text_frame = tk.Frame(frame, borderwidth=0, highlightthickness=0)
+        self._paint(text_frame, background="surface")
+        text_frame.grid(row=1, column=0, sticky=tk.NSEW)
+        text_frame.rowconfigure(0, weight=1)
+        text_frame.columnconfigure(0, weight=1)
+        self.rules_text = tk.Text(text_frame, height=6, width=1, wrap=tk.NONE, padx=10, pady=8)
         self._classic_widgets.append(self.rules_text)
-        self.rules_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        ttk.Button(rules_actions, text="加载规则", style="Secondary.TButton", command=self._load_rules).pack(fill=tk.X)
-        ttk.Button(
-            rules_actions, text="规则模板", style="Secondary.TButton", command=self._show_ids_rule_templates
-        ).pack(fill=tk.X, pady=(4, 0))
-        ttk.Button(rules_actions, text="自动生成", style="Secondary.TButton", command=self._show_rule_suggestions).pack(
-            fill=tk.X, pady=(4, 0)
+        rules_scroll = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=self.rules_text.yview)
+        self.rules_text.configure(yscrollcommand=rules_scroll.set)
+        self.rules_text.grid(row=0, column=0, sticky=tk.NSEW)
+        rules_scroll.grid(row=0, column=1, sticky=tk.NS)
+        notebook.add(frame, text="IDS 规则")
+
+    def _build_log_strip(self) -> None:
+        colors = build_colors(self.dark_mode.get())
+        strip = tk.Frame(self, height=30, borderwidth=0, highlightthickness=0)
+        self._paint(strip, background="surface_2")
+        strip.grid(row=2, column=0, sticky=tk.EW)
+        strip.pack_propagate(False)
+        self._log_strip = strip
+        self._paint(hline(strip, colors["border"]), background="border").pack(side=tk.TOP, fill=tk.X)
+        self._paint(
+            tk.Label(strip, text="日志", font=self._theme.font_tiny), background="surface_2", foreground="text_faint"
+        ).pack(side=tk.LEFT, padx=(12, 8))
+
+        self._log_text = tk.Text(
+            strip, height=1, width=1, wrap=tk.NONE, padx=0, pady=0, borderwidth=0, highlightthickness=0
         )
-        ttk.Button(rules_actions, text="清空规则", style="Secondary.TButton", command=self._clear_rules).pack(
-            fill=tk.X, pady=(4, 0)
+        self._classic_widgets.append(self._log_text)
+        # 单行模式下只占一行的高度（fill=X，不纵向拉伸）：30px 的栏比一行文字
+        # 高 9px，拉伸开就会露出上一行的下半截，看起来像两行文字叠在一起
+        self._log_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self._log_text.configure(state=tk.DISABLED)
+
+        self._log_expand_btn = ttk.Button(strip, text="展开", width=5, style="Tiny.TButton", command=self._toggle_log)
+        self._log_expand_btn.pack(side=tk.RIGHT, padx=6)
+        self._error_badge = self._paint(
+            tk.Label(strip, text="", font=self._theme.font_tiny), background="surface_2", foreground="danger"
         )
-        bottom_area.add(rules_frame, weight=1)
-        self._bottom_panes = bottom_area
-        self._workspace = workspace
-        self._main_panes = main_area
-        self._build_status_bar()
-        self._build_table_menu()
-        self._build_tooltips()
-        self._set_initial_empty_state()
-        self.after(50, self._apply_sash_positions)
+        self._error_badge.pack(side=tk.RIGHT, padx=(0, 4))
 
     def _build_status_bar(self) -> None:
-        bar = ttk.Frame(self, padding=(10, 3), style="Toolbar.TFrame")
+        colors = build_colors(self.dark_mode.get())
+        bar = tk.Frame(self, height=27, borderwidth=0, highlightthickness=0)
+        self._paint(bar, background="surface")
         bar.grid(row=3, column=0, sticky=tk.EW)
-        bar.columnconfigure(1, weight=1)
-        self._status_bar = tk.Label(
-            bar,
-            textvariable=self.status_text_var,
-            font=self._theme.font_small,
-            borderwidth=0,
-            highlightthickness=0,
+        bar.pack_propagate(False)
+        self._paint(hline(bar, colors["border"]), background="border").pack(side=tk.BOTTOM, fill=tk.X)
+
+        self._status_bar = self._paint(
+            tk.Label(bar, textvariable=self.status_text_var, font=self._theme.font_small),
+            background="surface",
+            foreground="text_dim",
         )
-        self._status_bar.grid(row=0, column=0, sticky=tk.W, padx=(0, 12))
-        self._busy_label = ttk.Label(bar, textvariable=self.busy_text_var, style="Muted.TLabel")
-        self._busy_label.grid(row=0, column=2, sticky=tk.E)
+        self._status_bar.pack(side=tk.LEFT, padx=(12, 10))
+        self._status_detail = self._paint(
+            tk.Label(bar, text="", font=self._theme.font_small), background="surface", foreground="text_faint"
+        )
+        self._status_detail.pack(side=tk.LEFT)
+        self._paint(
+            tk.Label(bar, text=f"NetGuard {__version__}", font=self._theme.font_small),
+            background="surface",
+            foreground="text_faint",
+        ).pack(side=tk.RIGHT, padx=(0, 12))
 
     def _build_tooltips(self) -> None:
         pairs = [
@@ -854,11 +1290,18 @@ class NetGuardApp(tk.Tk):
         }
         for sequence, callback in mapping.items():
             self.bind(sequence, partial(self._invoke_ignoring_event, callback))
-        # Tk Text 类绑定了 <Control-o>（自插入换行），与"打开 pcap"冲突：
-        # 在每个 Text 上拦截该序列，一次按键只触发主窗口动作
-        for text in (self._log_text, self.detail, self.hex_view, self.stats_text, self.rules_text):
+        # Tk Text 类绑定了 <Control-o>（自插入换行），与「打开 pcap」冲突。
+        # 控件级绑定先于类绑定执行，这里直接执行打开动作并返回 "break"，
+        # 一次按键只打开文件、不再插入换行。注意不能只返回 "break"：那会连同
+        # 主窗口的绑定一起吃掉，快捷键看起来彻底失效。
+        for text in (self._log_text, self.hex_view, self.rules_text):
             if text is not None:
-                text.bind("<Control-o>", lambda _event: "break")
+                text.bind("<Control-o>", self._open_pcap_from_text)
+
+    def _open_pcap_from_text(self, _event: tk.Event | None = None) -> str:
+        """Text 控件内的 Ctrl+O：执行打开动作并阻断 Tk 的默认换行插入。"""
+        self._open_pcap()
+        return "break"
 
     def _on_escape(self) -> None:
         # 焦点在输入框时 Esc 是取消/收起输入的惯例，不应弹"停止抓包"确认框
@@ -881,6 +1324,7 @@ class NetGuardApp(tk.Tk):
         menu.add_command(label="复制摘要", command=lambda: self._copy_selected("summary"))
         menu.add_command(label="复制整行", command=lambda: self._copy_selected("row"))
         menu.add_command(label="复制源→目的", command=lambda: self._copy_selected("endpoints"))
+        menu.add_command(label="复制解析详情", command=lambda: self._copy_selected("detail"))
         menu.add_command(label="复制十六进制", command=lambda: self._copy_selected("hex"))
         menu.add_separator()
         menu.add_command(label="用摘要筛选", command=self._filter_by_selected_summary)
@@ -1003,18 +1447,13 @@ class NetGuardApp(tk.Tk):
         elif mode == "endpoints":
             text = f"{packet.src}:{packet.src_port or ''} -> {packet.dst}:{packet.dst_port or ''}"
         elif mode == "hex":
-            text = hex_dump(packet.raw)
-        else:
-            text = "\t".join(
-                (
-                    f"{packet.timestamp:.3f}",
-                    f"{packet.src}:{packet.src_port or ''}",
-                    f"{packet.dst}:{packet.dst_port or ''}",
-                    packet.protocol,
-                    str(packet.length),
-                    packet.summary,
-                )
+            text = "\n".join(
+                f"{offset}  {hex_text:<48}  {ascii_text}" for offset, hex_text, ascii_text in hex_rows(packet.raw)
             )
+        elif mode == "detail":
+            text = _format_packet(packet)
+        else:
+            text = "\t".join(packet_row(packet))
         self.clipboard_clear()
         self.clipboard_append(text)
         self._log("已复制到剪贴板")
@@ -1135,61 +1574,111 @@ class NetGuardApp(tk.Tk):
         self._update_control_states()
 
     def _set_initial_empty_state(self) -> None:
-        self.detail.insert("1.0", "选择左侧数据包后，这里显示协议字段解析详情。")
-        self.hex_view.insert("1.0", "选择左侧数据包后，这里显示原始字节（十六进制视图）。")
-        self.alerts.insert(tk.END, "命中 IDS 规则后将在这里显示告警；双击告警可定位对应数据包。")
-        self.alerts_placeholder = True
-        self.error_list.insert(tk.END, "开始抓包后，这里显示解析异常数据包；双击可定位到对应数据包。")
-        self.stats_text.insert("1.0", "开始抓包后，这里显示总字节、丢弃数量、协议分布和速率。")
+        # 空状态的文字要短：解析树的两列是定宽（字段 120px / 值 200px），
+        # Treeview 单元格不会换行，长句子会被直接截断成半句
+        self._show_empty_detail("未选中数据包", "点选一行查看协议字段")
+        self._set_hex_message("未选中数据包", "点选数据包后这里显示原始字节（十六进制 + ASCII）。")
+        if self._table_hint is not None:
+            self._table_hint.configure(text="尚未捕获任何数据包 · 点击左侧「开始」或按 F5 启动")
+
+    def _show_empty_detail(self, title: str, hint: str) -> None:
+        """详情面板的空状态：清空解析树并给出下一步提示。"""
+        self._clear_detail_tree()
+        self.detail.insert("", tk.END, iid="__empty__", text=f"  {title}", values=("",), tags=("group",))
+        self.detail.insert("", tk.END, iid="__empty_hint__", text="", values=(hint,), tags=("key",))
+        self._detail_nodes["__empty__"] = DetailNode(title, kind="group")
+        self._detail_nodes["__empty_hint__"] = DetailNode(hint, kind="key")
+
+    def _set_hex_message(self, title: str, hint: str) -> None:
+        self.hex_view.configure(state=tk.NORMAL)
+        self.hex_view.delete("1.0", tk.END)
+        self.hex_view.insert(tk.END, f"{title}\n\n{hint}")
+        self.hex_view.configure(state=tk.DISABLED)
+
+    def _clear_detail_tree(self) -> None:
+        self._detail_nodes.clear()
+        with suppress(tk.TclError):
+            self.detail.delete(*self.detail.get_children())
 
     def _update_control_states(self) -> None:
         has_device = bool(self._selected_device_name())
-        self.start_btn.configure(state=tk.NORMAL if has_device and not self.capturing else tk.DISABLED)
-        self.stop_btn.configure(state=tk.NORMAL if self.capturing else tk.DISABLED)
-        self.pause_btn.configure(state=tk.NORMAL if self.capturing else tk.DISABLED)
-        self.export_alerts_btn.configure(state=tk.NORMAL if self._real_alert_count() > 0 else tk.DISABLED)
-        self.save_pcap_btn.configure(state=tk.NORMAL if self.events else tk.DISABLED)
+        states = {
+            "start": tk.NORMAL if has_device and not self.capturing else tk.DISABLED,
+            "stop": tk.NORMAL if self.capturing else tk.DISABLED,
+            "pause": tk.NORMAL if self.capturing else tk.DISABLED,
+            "export": tk.NORMAL if self._real_alert_count() > 0 else tk.DISABLED,
+            "save": tk.NORMAL if self.events else tk.DISABLED,
+        }
+        for key, state in states.items():
+            button = self._rail_buttons.get(key)
+            if button is not None:
+                with suppress(tk.TclError):
+                    button.configure(state=state)
+        self._sync_rail_styles()
         self._update_indicator()
 
+    def _sync_rail_styles(self) -> None:
+        """按运行状态为操作轨按钮选样式：抓包中把「停止」提为主操作。"""
+        mapping = {
+            "start": "RailAccent.TButton" if not self.capturing else "Rail.TButton",
+            "stop": "RailDanger.TButton" if self.capturing else "Rail.TButton",
+            "pause": "RailActive.TButton" if self.capturing and self.paused else "Rail.TButton",
+        }
+        for key, style in mapping.items():
+            button = self._rail_buttons.get(key)
+            if button is None:
+                continue
+            with suppress(tk.TclError):
+                button.configure(style=style)
+
     def _log(self, msg: str) -> None:
-        self.status_var.set(msg)
         if self._log_text is None:
             return
         self._log_text.configure(state=tk.NORMAL)
-        self._log_text.insert(tk.END, f"{msg}\n")
+        # 行间换行写在「下一条」之前，日志末尾不留换行：Text 末尾的换行会多出一条
+        # 空显示行，滚到底部时看到的是那条空行，最后一条日志反被挤到可视区之外
+        # （单行模式下表现为整条日志看不见，或只露出上半截）。
+        prefix = "" if self._log_text.index("end-1c") == "1.0" else "\n"
+        self._log_text.insert(tk.END, f"{prefix}{msg}")
         lines = int(self._log_text.index("end-1c").split(".")[0])
         if lines > 200:
             self._log_text.delete("1.0", f"{lines - 150}.0")
-        self._log_text.see(tk.END)
+        self._log_text.yview_moveto(1.0)
         self._log_text.configure(state=tk.DISABLED)
 
     def _toggle_log(self) -> None:
+        """日志条在单行与 8 行之间切换；单行模式下始终显示最新一条。"""
         self._log_expanded = not self._log_expanded
-        if self._log_text is None:
+        if self._log_strip is None or self._log_text is None:
             return
-        if self._log_expanded:
-            self._log_text.configure(height=12)
-            self._log_expand_btn.configure(text="收起")
-        else:
-            self._log_text.configure(height=2)
-            self._log_expand_btn.configure(text="展开")
+        self._log_strip.configure(height=30 if not self._log_expanded else 138)
+        self._log_text.configure(height=1 if not self._log_expanded else 7)
+        # 展开时把文本域纵向铺满，收起时只占一行（多出来的高度会露出上一行）
+        self._log_text.pack_configure(fill=tk.BOTH if self._log_expanded else tk.X)
+        if self._log_expand_btn is not None:
+            self._log_expand_btn.configure(text="展开" if not self._log_expanded else "收起")
+        self._log_text.yview_moveto(1.0)
 
     def _update_indicator(self) -> None:
         colors = build_colors(self.dark_mode.get())
         if self.capturing and not self.paused:
-            state, text = "capturing", "● 抓包中"
+            state, text, detail = "capturing", "抓包中", self._active_bpf_filter or "全部流量"
         elif self.capturing and self.paused:
-            state, text = "paused", "● 已暂停"
+            state, text, detail = "paused", "已暂停", "界面刷新已暂停，抓包仍在继续"
         else:
-            state, text = "idle", "● 空闲"
+            state, text, detail = "idle", "空闲", "未开始抓包"
         self.status_text_var.set(text)
-        if self._capture_indicator is not None:
-            self._capture_indicator.configure(fg=status_color(colors, state))
+        if self._pill is not None:
+            self._pill.set_state(text, colors, state)
         if self._status_bar is not None:
-            self._status_bar.configure(fg=status_color(colors, state), bg=colors["toolbar"])
+            token = "success" if state == "capturing" else "warning" if state == "paused" else "text_dim"
+            self._status_bar.configure(foreground=colors[token])
+        if self._status_detail is not None:
+            self._status_detail.configure(text=f"· {detail}")
 
     def _real_alert_count(self) -> int:
-        return 0 if self.alerts_placeholder else self.alerts.size()
+        """告警表里真实告警的行数（表头计数、KPI 卡与导出都以它为准）。"""
+        return len(self.alerts.get_children())
 
     def _selected_device_name(self) -> str:
         selected = self.device_var.get()
@@ -1318,13 +1807,14 @@ class NetGuardApp(tk.Tk):
                 f"应用 BPF 将清空当前抓包数据并使用新过滤条件重新开始。\n\n"
                 f"{detail}。\n\n"
                 f"建议先导出告警数据（导出告警按钮），是否继续更换？",
+                parent=self,
             ):
                 current = self._format_bpf_for_log(getattr(self, "_active_bpf_filter", ""))
                 self._log(f"已取消应用 BPF，当前抓包仍使用：{current}")
                 return
             self.bpf_var.set(value)
             self.paused = False
-            self.pause_btn.configure(text="暂停")
+            self._set_rail_text("pause", "暂停")
             self.pipeline.stop()
             self.pipeline.reset_state()
             self._clear_capture_data()
@@ -1362,7 +1852,7 @@ class NetGuardApp(tk.Tk):
             self.capturing = True
             self.paused = False
             self._active_bpf_filter = ""
-            self.pause_btn.configure(text="暂停")
+            self._set_rail_text("pause", "暂停")
             self._log(f"正在离线回放 {path}")
             self._update_control_states()
         except Exception as exc:
@@ -1398,19 +1888,17 @@ class NetGuardApp(tk.Tk):
         self.events.clear()
         self.event_offset = 0
         self.filtered.clear()
-        self.alert_packet_indices.clear()
-        self._error_packet_indices.clear()
+        self._alert_by_row.clear()
+        self._alert_seq = 0
         self._last_error_refresh = 0.0
-        self._last_stats_text = ""
         self._last_error_state = None
         self.table.delete(*self.table.get_children())
-        self.alerts.delete(0, tk.END)
-        self.alerts_placeholder = False
-        self.error_list.delete(0, tk.END)
-        self.detail.delete("1.0", tk.END)
-        self.hex_view.delete("1.0", tk.END)
-        self.stats_text.delete("1.0", tk.END)
+        self.alerts.delete(*self.alerts.get_children())
+        self._clear_detail_tree()
+        self._reset_stats_display()
         self._update_packet_count()
+        # 标签页标题带实时计数，清空后必须一起归零，否则会一直显示「告警（N）」
+        self._update_alert_tab_label()
         self._set_initial_empty_state()
 
     def _show_display_filter_templates(self) -> None:
@@ -1424,7 +1912,18 @@ class NetGuardApp(tk.Tk):
     def _show_ids_rule_templates(self) -> None:
         TemplateDialog(self, "IDS 常用规则模板", IDS_RULE_TEMPLATES, self._append_generated_rules, multi_select=True)
 
-    def _apply_sash_positions(self) -> None:
+    def _apply_sash_positions(self, attempt: int = 0) -> None:
+        """等窗口真正成形后再恢复分隔条位置。
+
+        ttk.PanedWindow 会把 sashpos 钳制到「当前」可用空间：在窗口还没完成
+        首次布局时写入，请求的 554 会被夹成 0，主区域就塌成一条线。
+        这里先 update_idletasks 逼出一次布局，必要时有限次重试。
+        """
+        with suppress(tk.TclError):
+            self.update_idletasks()
+        if self.winfo_height() <= 100 and attempt < _SASH_RETRY_LIMIT:
+            self.after(60, lambda: self._apply_sash_positions(attempt + 1))
+            return
         self._apply_saved_sashes()
 
     def _restore_layout_state(self) -> None:
@@ -1448,22 +1947,75 @@ class NetGuardApp(tk.Tk):
         if w <= 100 or h <= 100:
             return
         saved = self._config.window.sashes
-        defaults = {
-            "workspace": [int(h * 0.58)],
-            "main": [int(w * 0.60)],
-            "bottom": [int(w * 0.48), int(w * 0.72)],
-        }
-        for name, pane in (
-            ("workspace", self._workspace),
-            ("main", self._main_panes),
-            ("bottom", self._bottom_panes),
-        ):
-            positions = saved.get(name) or defaults[name]
-            for index, pos in enumerate(positions):
-                try:
-                    pane.sashpos(index, int(pos))
-                except (tk.TclError, IndexError):
-                    break
+        # 旧布局的底部是「告警│统计│规则」三栏，它的 "bottom" 键在新布局里没有对应
+        # 窗格。看到它就说明配置来自重构前，此时整组分割位置都不可信，直接用默认值，
+        # 免得老用户升级后看到一格被压扁的窗口。
+        if "bottom" in saved:
+            saved = {}
+        # 默认分割比例：数据包列表约占六成，底部标签页留三分之一。
+        # 关键是用「窗格自身的尺寸」算，而不是窗口尺寸——否则底部会被挤成一条缝。
+        for name, pane in (("workspace", self._workspace), ("main", self._main_panes)):
+            span = pane.winfo_height() if name == "workspace" else pane.winfo_width()
+            if span <= 1:
+                continue
+            positions = saved.get(name) or [int((span - 8) * 0.62)]
+            self._set_sash_positions(name, pane, positions)
+
+    def _set_sash_positions(self, name: str, pane: ttk.PanedWindow, positions: list[int]) -> None:
+        """钳制后写入分隔条位置：两侧窗格都要留够显示内容的最小尺寸。
+
+        ttk.PanedWindow 的分隔条位置是绝对值，窗口变窄时不会自动回退；不钳制的话
+        检视面板会被压成一条缝，值列（面板里唯一的内容）直接被裁掉。
+        尾部下限取「常量与尾部窗格请求尺寸中的较大者」，这样用户把检视面板的列拖宽
+        之后，缩窗口也不会把值列裁掉。
+        """
+        span = pane.winfo_height() if name == "workspace" else pane.winfo_width()
+        if span <= 1:
+            return
+        min_lead, min_tail = _SASH_MIN_SIZES[name]
+        min_tail = max(min_tail, self._tail_pane_min(pane, horizontal=name == "main"))
+        if span < min_lead + min_tail:
+            # 空间不足以同时满足两侧时均分，总比让一侧彻底塌掉好
+            min_lead = min_tail = span // 2
+        for index, pos in enumerate(positions):
+            clamped = max(min_lead, min(min(int(pos), span - min_tail), span - min_lead))
+            try:
+                if pane.sashpos(index) == clamped:
+                    # 已经是合法位置：不写回，避免无谓的重新布局（也避免回调自激）
+                    continue
+                pane.sashpos(index, clamped)
+            except (tk.TclError, IndexError):
+                break
+
+    def _tail_pane_min(self, pane: ttk.PanedWindow, *, horizontal: bool) -> int:
+        """尾部窗格的请求尺寸（内容决定的最小可用宽度/高度）；取不到时返回 0。"""
+        panes = pane.panes()
+        if len(panes) < 2:
+            return 0
+        try:
+            widget = self.nametowidget(panes[-1])
+        except tk.TclError:
+            return 0
+        size = widget.winfo_reqwidth() if horizontal else widget.winfo_reqheight()
+        return max(0, int(size))
+
+    def _on_pane_configure(self, name: str, _event: tk.Event | None = None) -> None:
+        """窗格尺寸变化后重新钳制分隔条。
+
+        每次事件都排一个空闲回调（不合并）：一次拖动会连发多个事件，而回调读的是
+        窗格「当时」的尺寸——只有最后那次读到的才是最终布局。
+        """
+        self.after_idle(partial(self._clamp_sash_now, name))
+
+    def _clamp_sash_now(self, name: str) -> None:
+        """只处理当前分隔条位置，不回到配置里的旧值——用户拖动过的位置要保留。"""
+        pane = self._workspace if name == "workspace" else self._main_panes
+        try:
+            positions = [pane.sashpos(index) for index in range(max(0, len(pane.panes()) - 1))]
+        except tk.TclError:
+            return
+        if positions:
+            self._set_sash_positions(name, pane, positions)
 
     def _apply_display_filter_template(self, value: str) -> None:
         self.display_filter.set(value)
@@ -1521,7 +2073,7 @@ class NetGuardApp(tk.Tk):
             self.capturing = True
             self._active_bpf_filter = bpf_filter
             self.paused = False
-            self.pause_btn.configure(text="暂停")
+            self._set_rail_text("pause", "暂停")
             self._log(f"正在监听 {self.device_var.get()}，BPF：{self._format_bpf_for_log(bpf_filter)}")
             self._update_control_states()
         except Exception as exc:
@@ -1534,13 +2086,13 @@ class NetGuardApp(tk.Tk):
     def _stop(self) -> None:
         if not self.capturing:
             return
-        if not messagebox.askokcancel("停止抓包", "确定要停止抓包吗？"):
+        if not messagebox.askokcancel("停止抓包", "确定要停止抓包吗？", parent=self):
             return
         self.pipeline.stop()
         self.capturing = False
         self._active_bpf_filter = ""
         self.paused = False
-        self.pause_btn.configure(text="暂停")
+        self._set_rail_text("pause", "暂停")
         self._log("已停止抓包")
         self._update_control_states()
 
@@ -1588,10 +2140,10 @@ class NetGuardApp(tk.Tk):
         self.paused = not self.paused
         if self.paused:
             self._pause_event_total = self.event_offset + len(self.events)
-            self.pause_btn.configure(text="恢复")
+            self._set_rail_text("pause", "恢复")
             self._log("已暂停刷新")
         else:
-            self.pause_btn.configure(text="暂停")
+            self._set_rail_text("pause", "暂停")
             self._log("已恢复刷新")
             self._refilter()
             self._catch_up_paused_alerts()
@@ -1599,26 +2151,22 @@ class NetGuardApp(tk.Tk):
 
     def _catch_up_paused_alerts(self) -> None:
         pause_total = getattr(self, "_pause_event_total", 0)
+        rows: list[tuple[int, Alert]] = []
         for local_idx, event in enumerate(self.events):
             global_idx = self.event_offset + local_idx
             if global_idx < pause_total:
                 continue
-            for alert in event.alerts:
-                if self.alerts_placeholder:
-                    self.alerts.delete(0, tk.END)
-                    self.alerts_placeholder = False
-                self.alerts.insert(
-                    0,
-                    f"{alert.timestamp:.3f} {alert.msg} {alert.src}:{alert.src_port} -> {alert.dst}:{alert.dst_port}",
-                )
-                self.alerts.itemconfigure(0, fg=self._alert_color(alert.msg))
-                self.alert_packet_indices.insert(0, global_idx)
-        self._trim_alerts()
-        self._update_control_states()
+            rows.extend((global_idx, alert) for alert in event.alerts)
+        self._insert_alert_rows(rows)
 
     def _update_packet_count(self) -> None:
-        total = len(self.filtered)
-        self.packet_count_var.set(f"已显示 {total} 条")
+        shown = len(self.filtered)
+        total = len(self.events)
+        if self._match_chip is not None:
+            self._match_chip.configure(text=f"{shown:,} / {total:,} 条匹配")
+        if self._table_hint is not None:
+            hint = f"共 {total:,} 条 · 显示 {shown:,}" if total else "尚未捕获任何数据包 · 点击左侧「开始」或按 F5 启动"
+            self._table_hint.configure(text=hint)
 
     def _clear(self) -> None:
         self._clear_capture_data()
@@ -1636,7 +2184,7 @@ class NetGuardApp(tk.Tk):
                 self.pipeline.stop()
                 self.capturing = False
                 self.paused = False
-                self.pause_btn.configure(text="暂停")
+                self._set_rail_text("pause", "暂停")
                 self._log("抓包已因错误停止，请检查网卡权限或重新选择网卡后重试")
                 self._update_control_states()
             events = self.pipeline.pump(PUMP_BATCH)
@@ -1644,7 +2192,7 @@ class NetGuardApp(tk.Tk):
                 self._log("pcap 回放已完成")
                 self.capturing = False
                 self.paused = False
-                self.pause_btn.configure(text="暂停")
+                self._set_rail_text("pause", "暂停")
                 self._update_control_states()
             if events:
                 start_idx = self.event_offset + len(self.events)
@@ -1664,20 +2212,96 @@ class NetGuardApp(tk.Tk):
         self.after(TICK_MS, self._tick)
 
     def _append_alerts(self, events: list[PacketEvent], start_idx: int) -> None:
-        for offset, event in enumerate(events):
-            idx = start_idx + offset
-            for alert in event.alerts:
-                if self.alerts_placeholder:
-                    self.alerts.delete(0, tk.END)
-                    self.alerts_placeholder = False
-                self.alerts.insert(
-                    0,
-                    f"{alert.timestamp:.3f} {alert.msg} {alert.src}:{alert.src_port} -> {alert.dst}:{alert.dst_port}",
-                )
-                self.alerts.itemconfigure(0, fg=self._alert_color(alert.msg))
-                self.alert_packet_indices.insert(0, idx)
+        rows = [(start_idx + offset, alert) for offset, event in enumerate(events) for alert in event.alerts]
+        self._insert_alert_rows(rows)
+
+    def _insert_alert_rows(self, rows: list[tuple[int, Alert]]) -> None:
+        """把 (数据包全局索引, 告警) 追加进告警表。
+
+        行 iid 形如 ``"{数据包索引}:{序号}"``，双击定位时直接解析，无需额外映射表。
+        表格按时间正序增长（最新在最下方），只有当用户本来就停在底部时才自动
+        跟随滚动——否则正在翻看历史告警的人会被不断跳走。
+        """
+        if not rows:
+            return
+        follower = self._tree_at_bottom(self.alerts)
+        # 斑马纹的奇偶从插入前的行数起算；get_children 是 Tcl 往返，不能每插一行调一次
+        parity = len(self.alerts.get_children())
+        for packet_idx, alert in rows:
+            self._alert_seq += 1
+            iid = f"{packet_idx}:{self._alert_seq}"
+            self._alert_by_row[iid] = alert
+            self.alerts.insert(
+                "",
+                tk.END,
+                iid=iid,
+                values=alert_row(alert),
+                tags=(severity_key(alert), "even" if parity % 2 else "odd"),
+            )
+            parity += 1
+        if follower:
+            last = self.alerts.get_children()
+            if last:
+                self.alerts.see(last[-1])
         self._trim_alerts()
+        self._update_alert_tab_label()
         self._update_control_states()
+
+    @staticmethod
+    def _tree_at_bottom(tree: ttk.Treeview) -> bool:
+        try:
+            return tree.yview()[1] >= 0.999
+        except tk.TclError:
+            return True
+
+    def _update_alert_tab_label(self) -> None:
+        self._set_alert_tab_label(self._real_alert_count())
+
+    def _set_alert_tab_label(self, count: int) -> None:
+        """告警标签页标题带实时计数（0 时不显示括号）。"""
+        if self._bottom_tabs is None:
+            return
+        with suppress(tk.TclError):
+            self._bottom_tabs.tab(self._alert_tab_index, text=f"告警（{count}）" if count else "告警")
+
+    def _set_issue_tab_label(self, count: int) -> None:
+        if self._bottom_tabs is None:
+            return
+        with suppress(tk.TclError):
+            self._bottom_tabs.tab(self._issue_tab_index, text=f"解析问题（{count}）" if count else "解析问题")
+
+    def _sort_alerts(self, col: str) -> None:
+        """告警表按列排序；时间与级别按语义排序而非字典序。"""
+        if col == self._alert_sort_column:
+            self._alert_sort_descending = not self._alert_sort_descending
+        else:
+            self._alert_sort_column = col
+            self._alert_sort_descending = False
+        reverse = self._alert_sort_descending
+        rows = list(self.alerts.get_children(""))
+
+        def key(iid: str) -> tuple[int, object]:
+            alert = self._alert_by_row.get(iid)
+            if alert is None:
+                return (0, "")
+            if col == "time":
+                return (0, alert.timestamp)
+            if col == "severity":
+                return (0, {"high": 2, "medium": 1, "low": 0}[severity_key(alert)])
+            return (0, str(self.alerts.set(iid, col)))
+
+        rows.sort(key=key, reverse=reverse)
+        for index, iid in enumerate(rows):
+            self.alerts.move(iid, "", index)
+        self._update_alert_sort_indicator()
+
+    def _update_alert_sort_indicator(self) -> None:
+        base = {"time": "时间", "severity": "级别", "source": "来源", "msg": "告警信息", "tuple": "五元组"}
+        for col, text in base.items():
+            if col == self._alert_sort_column:
+                text += " ▼" if self._alert_sort_descending else " ▲"
+            with suppress(tk.TclError):
+                self.alerts.heading(col, text=text)
 
     def _append_events(self, events: list[PacketEvent], start_idx: int | None = None) -> None:
         needle = self.display_filter.get().strip().lower()
@@ -1693,27 +2317,11 @@ class NetGuardApp(tk.Tk):
         self._update_packet_count()
         self._update_control_states()
 
-    def _alert_color(self, msg: str) -> str:
-        return severity_color(build_colors(self.dark_mode.get()), msg)
-
     def _insert_packet(self, idx: int, packet: PacketInfo) -> None:
         tags = ["even" if idx % 2 == 0 else "odd", packet.protocol.lower()]
         if packet.issues:
             tags.append("issue")
-        self.table.insert(
-            "",
-            0,
-            iid=str(idx),
-            tags=tuple(tags),
-            values=(
-                f"{packet.timestamp:.3f}",
-                f"{packet.src}:{packet.src_port or ''}",
-                f"{packet.dst}:{packet.dst_port or ''}",
-                packet.protocol,
-                packet.length,
-                packet.summary,
-            ),
-        )
+        self.table.insert("", 0, iid=str(idx), tags=tuple(tags), values=packet_row(packet))
 
     def _trim_table(self) -> None:
         rows = self.table.get_children()
@@ -1728,12 +2336,12 @@ class NetGuardApp(tk.Tk):
             self._log(f"表格已裁剪 {len(removed)} 行")
 
     def _trim_alerts(self) -> None:
-        if self.alerts_placeholder:
-            return
-        extra = self.alerts.size() - MAX_ALERT_ROWS
+        extra = len(self.alerts.get_children()) - MAX_ALERT_ROWS
         if extra > 0:
-            self.alerts.delete(self.alerts.size() - extra, tk.END)
-            del self.alert_packet_indices[-extra:]
+            rows = self.alerts.get_children()
+            for iid in rows[:extra]:
+                self._alert_by_row.pop(iid, None)
+            self.alerts.delete(*rows[:extra])
             self._log(f"告警已裁剪 {extra} 条")
 
     def _drop_oldest_events(self, trim_count: int) -> None:
@@ -1746,8 +2354,6 @@ class NetGuardApp(tk.Tk):
         del self.events[:trim_count]
         self.event_offset += trim_count
         self.filtered = [idx for idx in self.filtered if idx >= self.event_offset]
-        self.alert_packet_indices = [idx for idx in self.alert_packet_indices if idx >= self.event_offset]
-        self._error_packet_indices = [idx for idx in self._error_packet_indices if idx >= self.event_offset]
         if self._refilter_queue:
             self._refilter_queue = [idx for idx in self._refilter_queue if idx >= self.event_offset]
         rows_set = set(self.table.get_children())
@@ -1759,15 +2365,63 @@ class NetGuardApp(tk.Tk):
         selected = self.table.selection()
         if not selected:
             return
-        idx = int(selected[0])
+        try:
+            idx = int(selected[0])
+        except ValueError:
+            return
         event = self._event_at(idx)
         if event is None:
             return
         packet = event.packet
-        self.detail.delete("1.0", tk.END)
-        self.detail.insert(tk.END, _format_packet(packet))
+        self._fill_detail_tree(packet)
+        self._fill_hex_view(packet)
+
+    def _fill_detail_tree(self, packet: PacketInfo) -> None:
+        """把协议解析树写进详情面板，顶层分组默认展开。"""
+        self._clear_detail_tree()
+        counter = 0
+
+        def add(nodes: list[DetailNode], parent: str, depth: int) -> None:
+            nonlocal counter
+            for node in nodes:
+                counter += 1
+                iid = f"n{counter}"
+                self._detail_nodes[iid] = node
+                self.detail.insert(
+                    parent,
+                    tk.END,
+                    iid=iid,
+                    text=f"  {node.label}",
+                    values=(node.value,),
+                    tags=(node.kind,),
+                    # 只展开前两层：深层协议头默认收起，避免一次铺满整个面板
+                    open=depth < 2,
+                )
+                if node.children:
+                    add(node.children, iid, depth + 1)
+
+        add(build_detail_tree(packet), "", 0)
+
+    def _fill_hex_view(self, packet: PacketInfo) -> None:
+        """十六进制视图：偏移 / 字节 / ASCII 三段分色，超大帧截断显示。"""
+        self.hex_view.configure(state=tk.NORMAL)
         self.hex_view.delete("1.0", tk.END)
-        self.hex_view.insert(tk.END, hex_dump(packet.raw))
+        if not packet.raw:
+            self.hex_view.insert(tk.END, "该数据包没有捕获到原始字节。\n")
+            self.hex_view.configure(state=tk.DISABLED)
+            return
+        rows = hex_rows(packet.raw[:MAX_HEX_BYTES])
+        for offset, hex_text, ascii_text in rows:
+            self.hex_view.insert(tk.END, f"{offset}  ", "offset")
+            self.hex_view.insert(tk.END, f"{hex_text:<48}  ", "bytes")
+            self.hex_view.insert(tk.END, f"{ascii_text}\n", "ascii")
+        if len(packet.raw) > MAX_HEX_BYTES:
+            self.hex_view.insert(
+                tk.END,
+                f"\n…… 仅显示前 {MAX_HEX_BYTES} 字节，共 {len(packet.raw)} 字节。\n",
+                "offset",
+            )
+        self.hex_view.configure(state=tk.DISABLED)
 
     def _event_at(self, idx: int) -> PacketEvent | None:
         local_idx = idx - self.event_offset
@@ -1775,39 +2429,35 @@ class NetGuardApp(tk.Tk):
             return None
         return self.events[local_idx]
 
-    def _jump_to_alert_packet(self) -> None:
-        selection = self.alerts.curselection()
-        if not selection:
-            return
-        alert_idx = selection[0]
-        if alert_idx >= len(self.alert_packet_indices):
-            return
-        packet_idx = self.alert_packet_indices[alert_idx]
+    def _focus_packet_row(self, packet_idx: int) -> None:
         iid = str(packet_idx)
-        children = self.table.get_children()
-        if iid not in children:
+        if iid not in self.table.get_children():
             return
         self.table.selection_set(iid)
         self.table.see(iid)
         self.table.focus(iid)
         self._show_selected()
 
-    def _jump_to_error_packet(self) -> None:
-        selection = self.error_list.curselection()
+    def _jump_to_alert_packet(self) -> None:
+        selection = self.alerts.selection()
         if not selection:
             return
-        error_idx = selection[0]
-        if error_idx >= len(self._error_packet_indices):
+        # 行 iid 形如 "{packet_idx}:{seq}"，直接解析出目标数据包，无需额外映射表
+        try:
+            packet_idx = int(selection[0].split(":", 1)[0])
+        except ValueError:
             return
-        packet_idx = self._error_packet_indices[error_idx]
-        iid = str(packet_idx)
-        children = self.table.get_children()
-        if iid not in children:
+        self._focus_packet_row(packet_idx)
+
+    def _jump_to_error_packet(self) -> None:
+        selection = self.error_list.selection()
+        if not selection:
             return
-        self.table.selection_set(iid)
-        self.table.see(iid)
-        self.table.focus(iid)
-        self._show_selected()
+        try:
+            packet_idx = int(selection[0].split(":", 1)[0])
+        except ValueError:
+            return
+        self._focus_packet_row(packet_idx)
 
     def _debounced_refilter(self) -> None:
         if self._filter_after_id is not None:
@@ -1857,47 +2507,76 @@ class NetGuardApp(tk.Tk):
                 self._sort(self._sort_column, toggle=False)
 
     def _sort(self, col: str, *, toggle: bool = True) -> None:
+        """按列排序；时间与长度取底层数值，其余按显示文本。
+
+        时间列显示的是 ``HH:MM:SS.mmm``，直接对字符串排序会得到字典序而不是
+        时间序；这里回查事件对象拿原始时间戳，跨天回放也不会排错。
+        """
         if toggle and col == self._sort_column:
             self._sort_descending = not self._sort_descending
         elif toggle:
             self._sort_descending = False
         self._sort_column = col
-        rows = [(self.table.set(row, col), row) for row in self.table.get_children("")]
-        if col in {"time", "len"}:
-            rows.sort(key=lambda item: _sort_key(item[0]), reverse=self._sort_descending)
-        else:
-            rows.sort(key=lambda item: item[0], reverse=self._sort_descending)
-        for index, (_, row) in enumerate(rows):
-            self.table.move(row, "", index)
+
+        def key(iid: str) -> tuple[int, Any]:
+            event = self._event_at(int(iid)) if iid.isdigit() else None
+            if event is not None:
+                if col == "time":
+                    return (0, event.packet.timestamp)
+                if col == "len":
+                    return (0, event.packet.length)
+            return (1, self.table.set(iid, col))
+
+        rows = sorted(self.table.get_children(""), key=key, reverse=self._sort_descending)
+        for index, iid in enumerate(rows):
+            self.table.move(iid, "", index)
         self._update_sort_indicator()
         self._schedule_config_save()
 
+    def _reset_stats_display(self) -> None:
+        """清空统计页与 KPI 卡回到零值（清空数据时调用）。"""
+        for card in self._stat_cards.values():
+            card.set_value("0")
+            card.clear()
+        for key in ("total_bytes", "total_packets", "dropped", "parse_errors"):
+            label = self._stats_cells.get(key)
+            if label is not None:
+                label.configure(text="0")
+        for _track, fill, count in self._proto_bars.values():
+            fill.place_configure(relwidth=0.0)
+            count.configure(text="0")
+        self.error_list.delete(*self.error_list.get_children())
+        self.error_summary_var.set("解析问题 0 · 致命异常 0")
+        # 标签页计数与摘要同步归零，不依赖下一轮 _refresh_errors
+        self._set_issue_tab_label(0)
+
     def _refresh_stats(self) -> None:
         status = self.pipeline.status()
-        self.packet_total_var.set(f"数据包 {status.total_packets}")
-        self.rate_var.set(f"{status.packets_per_second:.1f} 包/秒")
-        self.bytes_rate_var.set(f"{status.bytes_per_second:.1f} 字节/秒")
-        self.session_var.set(f"会话 {status.active_sessions}")
-        self.alert_count_var.set(f"告警 {self._real_alert_count()}")
-        dropped = status.dropped_packets
-        header = f"总字节：{status.total_bytes:,}"
-        if dropped:
-            header += f"  丢弃：{dropped}"
-        lines = [header, ""]
+        alert_count = self._real_alert_count()
+        self._stat_cards["packets"].set_value(f"{status.total_packets:,}")
+        self._stat_cards["packets"].push_sample(status.total_packets)
+        self._stat_cards["rate"].set_value(f"{status.packets_per_second:,.1f}", unit="包/秒")
+        self._stat_cards["rate"].push_sample(status.packets_per_second)
+        self._stat_cards["bytes_rate"].set_value(_compact_bytes(status.bytes_per_second), unit="字节/秒")
+        self._stat_cards["bytes_rate"].push_sample(status.bytes_per_second)
+        self._stat_cards["sessions"].set_value(f"{status.active_sessions:,}")
+        self._stat_cards["sessions"].push_sample(status.active_sessions)
+        self._stat_cards["alerts"].set_value(f"{alert_count:,}")
+        self._stat_cards["alerts"].push_sample(alert_count)
+
+        if self._drop_hint is not None:
+            self._drop_hint.configure(text=f"丢弃 {status.dropped_packets:,} · 解析异常 {status.parse_errors:,}")
+
+        self._stats_cells["total_bytes"].configure(text=_compact_bytes(status.total_bytes))
+        self._stats_cells["total_packets"].configure(text=f"{status.total_packets:,}")
+        self._stats_cells["dropped"].configure(text=f"{status.dropped_packets:,}")
+        self._stats_cells["parse_errors"].configure(text=f"{status.parse_errors:,}")
+
         total = sum(status.protocol_counts.values()) or 1
-        max_bar = 28
-        for proto in ("TCP", "UDP", "HTTP", "DNS", "ICMP", "OTHER"):
-            count = status.protocol_counts.get(proto, 0)
-            if count == 0:
-                continue
-            bar_len = max(1, int(count / total * max_bar))
-            bar = "█" * bar_len
-            lines.append(f"  {proto:<5} {bar} {count}")
-        stats_text = "\n".join(lines)
-        if stats_text != self._last_stats_text:
-            self.stats_text.delete("1.0", tk.END)
-            self.stats_text.insert(tk.END, stats_text)
-            self._last_stats_text = stats_text
+        for proto, (_track, fill, count) in self._proto_bars.items():
+            value = status.protocol_counts.get(proto, 0)
+            count.configure(text=f"{value:,}")
+            fill.place_configure(relwidth=min(1.0, value / total))
         self._refresh_errors(status)
 
     def _refresh_errors(self, status: PipelineStatus | None = None) -> None:
@@ -1906,27 +2585,27 @@ class NetGuardApp(tk.Tk):
         dropped = status.dropped_packets
         parse_errs = status.parse_errors
         issue_count = 0
-        recent_issues: list[str] = []
-        issue_indices: list[int] = []
+        recent_issues: list[tuple[str, str, str, str, int]] = []
         # 从最新事件向旧事件遍历，收集最多 50 条异常及对应包索引
         start = max(0, len(self.events) - 300)
         for local_idx in range(len(self.events) - 1, start - 1, -1):
             event = self.events[local_idx]
-            if event.packet.issues:
-                issue_count += 1
-                if len(recent_issues) < 50:
-                    global_idx = self.event_offset + local_idx
-                    for issue in reversed(event.packet.issues):
-                        if len(recent_issues) >= 50:
-                            break
-                        recent_issues.append(
-                            f"{event.packet.timestamp:.3f} [{issue.layer}] {issue.message} "
-                            f"{event.packet.src}:{event.packet.src_port or ''} -> "
-                            f"{event.packet.dst}:{event.packet.dst_port or ''}"
-                        )
-                        issue_indices.append(global_idx)
-        # 变更检测 + 节流：最多每 2 秒刷新一次 Listbox
-        new_state = (dropped, parse_errs, issue_count, "\n".join(recent_issues[:50]))
+            packet = event.packet
+            if not packet.issues:
+                continue
+            issue_count += 1
+            if len(recent_issues) >= 50:
+                continue
+            global_idx = self.event_offset + local_idx
+            endpoint = (
+                f"{format_endpoint(packet.src, packet.src_port)} → {format_endpoint(packet.dst, packet.dst_port)}"
+            )
+            for issue in reversed(packet.issues):
+                if len(recent_issues) >= 50:
+                    break
+                recent_issues.append((f"{packet.timestamp:.3f}", issue.layer, issue.message, endpoint, global_idx))
+        # 变更检测 + 节流：最多每 2 秒重建一次表格
+        new_state = (dropped, parse_errs, issue_count, repr(recent_issues[:50]))
         now = time.monotonic()
         if new_state == self._last_error_state and now - self._last_error_refresh < 2.0:
             return
@@ -1936,14 +2615,19 @@ class NetGuardApp(tk.Tk):
         if dropped:
             parts.append(f"队列丢弃 {dropped}")
         parts.append(f"致命异常 {parse_errs}")
-        self.error_summary_var.set(" | ".join(parts))
-        self.error_list.delete(0, tk.END)
-        self._error_packet_indices = issue_indices
-        if not recent_issues:
-            self.error_list.insert(tk.END, "暂无异常数据包")
-        else:
-            for line in recent_issues:
-                self.error_list.insert(tk.END, line)
+        self.error_summary_var.set(" · ".join(parts))
+        self.error_list.delete(*self.error_list.get_children())
+        for seq, (stamp, layer, message, endpoint, global_idx) in enumerate(recent_issues):
+            self.error_list.insert(
+                "",
+                tk.END,
+                iid=f"{global_idx}:{seq}",
+                values=(stamp, layer, message, endpoint),
+                tags=("problem", "even" if seq % 2 else "odd"),
+            )
+        self._set_issue_tab_label(issue_count)
+        if self._error_badge is not None:
+            self._error_badge.configure(text=f"解析异常 {parse_errs}" if parse_errs else "")
 
     def _export_alerts(self) -> None:
         if self._real_alert_count() == 0:
@@ -1957,9 +2641,13 @@ class NetGuardApp(tk.Tk):
         if not path:
             return
         is_json = path.lower().endswith(".json")
-        # 在主线程快照数据，后台只做文件写入，避免触碰 Tk 控件
-        records = [alert.to_dict() for event in self.events for alert in event.alerts]
-        lines = list(self.alerts.get(0, tk.END))
+        # 在主线程快照数据，后台只做文件写入，避免触碰 Tk 控件。
+        # 两种格式都从同一份快照（self.events 里的全部告警）导出：改从告警表取
+        # 文本行会让 JSON 与文本的条数不一致（表格有 MAX_ALERT_ROWS 上限，
+        # 而且被裁剪/排序过的行并不等于全部告警）。
+        alerts = [alert for event in self.events for alert in event.alerts]
+        records = [alert.to_dict() for alert in alerts]
+        lines = [alert_detail_text(alert).replace("\n", " · ") for alert in alerts]
 
         def work() -> int:
             with open(path, "w", encoding="utf-8") as handle:

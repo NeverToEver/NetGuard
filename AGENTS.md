@@ -34,11 +34,14 @@ src/netguard/
   statistics/traffic_stats.py  rolling-window counters / rates
   discovery/subnet.py       subnet sweep + host resolution
   trafficgen.py             synthetic packet templates (demo/test/bench)
-  gui/main_ui.py            Tkinter main window (menu, status bar, context menu, shortcuts)
+  gui/main_ui.py            Tkinter shell (title bar, action rail, KPI strip, panels,
+                            dialogs, shortcuts); _build_* methods build each region
   gui/config.py             AppConfig: ~/.netguard_config.json read/write + legacy migration
-  gui/theme.py              ThemeManager + build_colors + system-theme detection + menu styling
-  gui/widgets.py            Tooltip and other reusable widgets
-  gui/view_models.py        display formatting helpers
+  gui/theme.py              ThemeManager + build_colors design tokens + ttk styles +
+                            severity/protocol colour helpers + system-theme detection
+  gui/widgets.py            Tooltip, StatCard, Sparkline, StatusPill, PanelHeader
+  gui/view_models.py        display formatting: packet/alert rows, protocol parse tree,
+                            hex rows, timestamp formatting
 tests/                      pytest suite (fakes/mocks; no libpcap, root, or display needed)
 scripts/                    unix + windows launchers, interpreter detection, app bundler, benchmark.py
   launch.py                 cross-platform one-click entry (--check / --setup, forwards to main.py)
@@ -111,7 +114,19 @@ Python emit the localized messages.
 - The GUI reads pipeline state only through `pipeline.status()` / `rule_count` /
   `capture_error`; do not reach into `pipeline.processor.*` or `pipeline.source.*` from the GUI.
 - GUI theme colors live in `gui/theme.py:build_colors()`; never hardcode hex colors in
-  `main_ui.py` — use `build_colors` / `severity_color` / `status_color` / `select_text`.
+  `main_ui.py`. Prefer the raw tokens (`surface`, `surface_2`, `border`, `text_dim`,
+  `accent`, `proto_*`); `bg` / `toolbar` / `panel` / `muted` are legacy aliases kept for
+  older dialog code. Derive tints with `mix()`, not new hex constants.
+- Native `tk` widgets do not take part in ttk styling. Register them with
+  `NetGuardApp._paint(widget, background="surface_2", foreground="text_dim")` so
+  `_apply_theme()` re-colours them on theme switch; do not `configure` colours ad hoc.
+- Treeview row colours are tags registered by `theme.tag_tree()`; `_apply_theme()` passes
+  the packet / alert / issue / detail trees so tags are refreshed on theme switch.
+- Alert severity comes from `theme.severity_key(alert)` (structured `Alert.severity`),
+  not from keyword-matching the message. `severity_color()` is only the legacy fallback.
+- The rail action buttons live in `self._rail_buttons` keyed by role; update their label
+  through `_set_rail_text(key, label)` and their state through `_update_control_states()`
+  — `_sync_rail_styles()` picks the style for the current capture state.
 - GUI state persistence goes through `gui/config.py:AppConfig`; add new persisted fields
   to `WindowState` + `to_dict`/`_apply`, and keep legacy `dark_mode` migration intact.
 - Dialogs must center with `center_on_parent`, bind `Esc` via `bind_dialog_keys`, and call
@@ -142,6 +157,33 @@ Python emit the localized messages.
   a widget or pipeline attribute the GUI touches, update `tests/test_gui_state.py` fakes too.
 - Windows `ipconfig`/`nbtstat` output is not UTF-8 on localized systems (e.g. cp936);
   decode subprocess output via `discovery.subnet._decode_output`, never `text=True`.
+- Tk widget defaults inflate the window's requested size: `tk.Text` defaults to
+  `width=80` characters and `tk.Canvas` to 10cm (~378px). Fill-style text areas and
+  sparklines must pass `width=1`, otherwise the layout demands ~2000px and the right-hand
+  content gets clipped on a 1600px window.
+- `ttk.PanedWindow.sashpos()` clamps against the *current* space, so restoring saved sash
+  positions before the first layout collapses a pane to 1px. `_apply_sash_positions()`
+  calls `update_idletasks()` and retries a bounded number of times; sash defaults are
+  computed from the pane's own size, not the window's.
+- Sash positions are absolute: `ttk.PanedWindow` never pulls them back when the window
+  narrows, so the trailing pane collapses (the inspector drops to 272px while its two
+  columns need 320px). `_on_pane_configure()` re-clamps on the paned window's *own*
+  `<Configure>`, with the trailing pane's requested size as the lower bound
+  (`_SASH_MIN_SIZES` is the floor). Do not bind this to a child's `<Configure>` or to the
+  toplevel: child events also fire while the user drags a sash and would fight the drag.
+- The two side-by-side panels' default column widths (`_DEFAULT_PACKET_COLUMNS` +
+  `_DEFAULT_DETAIL_COLUMNS`, 700 + 320px) plus scrollbars and padding must fit
+  `MIN_WINDOW_SIZE`: `tests/test_gui_layout.py` asserts the budget, and
+  `tests/test_gui_smoke.py` asserts nothing lands outside a minimum-size window.
+- Two widgets in the same `grid` cell silently overlap: the rail's 1px separator once
+  shared a cell with the content frame and was covered by it (`sticky="ns"` only stretches
+  vertically, so the line also sat in the middle of the cell). Give each region its own column.
+- Compact 30px chrome rows (the log strip) cannot host a normal `TButton` (it needs 34px
+  and gets squashed); use `Tiny.TButton` there.
+- `Ctrl+O` is bound on the toplevel, but Tk's `Text` class binding inserts a newline. A
+  widget-level binding that merely returns `"break"` swallows the toplevel binding too
+  (Tk dispatch order is widget → class → toplevel), so the shortcut dies inside a text box.
+  The widget handler must call `_open_pcap()` *and* return `"break"`.
 - Benchmark rule matching is a per-protocol full scan; 500 same-protocol rules is slow by
   design (see `docs/benchmark.md` → Known limitations).
 
