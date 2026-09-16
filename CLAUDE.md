@@ -103,11 +103,16 @@ state, last device, filters); shortcuts bind to the main window, not `bind_all`,
 unaffected; dialogs center on the parent, support `Esc`, and re-theme on `<<ThemeChanged>>`;
 long file operations run via `NetGuardApp._run_in_background` with status-bar feedback.
 
-Two Tk sizing traps that have bitten this layout: `tk.Text` defaults to `width=80` characters
-and `tk.Canvas` to ~378px, so fill-style widgets must pass `width=1`; and
-`ttk.PanedWindow.sashpos()` clamps against the current space, so sash restoration has to wait
-for the first real layout (see `_apply_sash_positions`) and compute defaults from the pane's
-own size, not the window's.
+Tk sizing traps that have bitten this layout: `tk.Text` defaults to `width=80` characters and
+`tk.Canvas` to ~378px, so fill-style widgets must pass `width=1`; `ttk.PanedWindow.sashpos()`
+clamps against the current space, so sash restoration has to wait for the first real layout
+(see `_apply_sash_positions`) and compute defaults from the pane's own size, not the window's.
+Sash positions are also absolute — the trailing pane collapses when the window narrows unless
+`_on_pane_configure()` re-clamps them on the paned window's own `<Configure>` (never on a
+child's, or it fights sash drags). The two side-by-side panels' default column widths plus
+scrollbars must fit `MIN_WINDOW_SIZE`; `tests/test_gui_layout.py` guards that budget.
+Unrelated trap: two widgets in the same `grid` cell silently overlap, which is how the rail
+separator ended up hidden behind the content frame.
 
 **Pipeline threading model** (`pipeline.py` + `capture/source.py` + `processing.py`):
 `CaptureSource` runs the `_capture_worker` (or `_file_worker` for pcap replay) filling

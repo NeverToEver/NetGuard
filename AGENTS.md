@@ -165,8 +165,25 @@ Python emit the localized messages.
   positions before the first layout collapses a pane to 1px. `_apply_sash_positions()`
   calls `update_idletasks()` and retries a bounded number of times; sash defaults are
   computed from the pane's own size, not the window's.
+- Sash positions are absolute: `ttk.PanedWindow` never pulls them back when the window
+  narrows, so the trailing pane collapses (the inspector drops to 272px while its two
+  columns need 320px). `_on_pane_configure()` re-clamps on the paned window's *own*
+  `<Configure>`, with the trailing pane's requested size as the lower bound
+  (`_SASH_MIN_SIZES` is the floor). Do not bind this to a child's `<Configure>` or to the
+  toplevel: child events also fire while the user drags a sash and would fight the drag.
+- The two side-by-side panels' default column widths (`_DEFAULT_PACKET_COLUMNS` +
+  `_DEFAULT_DETAIL_COLUMNS`, 700 + 320px) plus scrollbars and padding must fit
+  `MIN_WINDOW_SIZE`: `tests/test_gui_layout.py` asserts the budget, and
+  `tests/test_gui_smoke.py` asserts nothing lands outside a minimum-size window.
+- Two widgets in the same `grid` cell silently overlap: the rail's 1px separator once
+  shared a cell with the content frame and was covered by it (`sticky="ns"` only stretches
+  vertically, so the line also sat in the middle of the cell). Give each region its own column.
 - Compact 30px chrome rows (the log strip) cannot host a normal `TButton` (it needs 34px
   and gets squashed); use `Tiny.TButton` there.
+- `Ctrl+O` is bound on the toplevel, but Tk's `Text` class binding inserts a newline. A
+  widget-level binding that merely returns `"break"` swallows the toplevel binding too
+  (Tk dispatch order is widget → class → toplevel), so the shortcut dies inside a text box.
+  The widget handler must call `_open_pcap()` *and* return `"break"`.
 - Benchmark rule matching is a per-protocol full scan; 500 same-protocol rules is slow by
   design (see `docs/benchmark.md` → Known limitations).
 
