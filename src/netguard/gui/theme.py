@@ -376,10 +376,6 @@ class ThemeManager:
         return self._font_body
 
     @property
-    def font_text(self) -> tkfont.Font:
-        return self._font_text
-
-    @property
     def font_mono(self) -> tkfont.Font:
         return self._font_mono
 

@@ -7,6 +7,17 @@
 
 ## [Unreleased]
 
+### Removed
+
+- 一轮死代码清理（不做任何行为改动）：`NetGuardApp._load_config()` 与 `_on_busy()`、
+  `SubnetScanDialog` 里只赋值不读取的 `_all_displays`（构造参数仍在用）、
+  `CaptureSource.is_file_mode`（`replay_finished` 仍在读私有标志）、
+  `ThemeManager.font_text`（私有 `_font_text` 仍参与配置 TkTextFont）、
+  `PanelHeader.set_title()`、`StatCard` 的 `_colors` / `_unit` 两个只写属性。
+  保留 `SubnetScanDialog` 的 `_ev_*` 处理函数与 `Clock.__call__`：前者由
+  `_drain_events()` 按名字解析，后者是 Protocol 的调用签名，两者在静态引用里
+  都查不到。
+
 ## [0.3.0] - 2026-09-17
 
 本轮主题是**界面重构**：主窗口改为「应用外壳 + 工作区」两层结构，配色系统重做为三层

@@ -40,10 +40,6 @@ class CaptureSource:
         self._replay_finished = threading.Event()
 
     @property
-    def is_file_mode(self) -> bool:
-        return self._is_file_mode
-
-    @property
     def replay_finished(self) -> bool:
         """文件回放模式且文件已全部读取完毕。"""
         return self._is_file_mode and self._replay_finished.is_set()
